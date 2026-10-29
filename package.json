@@ -1,0 +1,28 @@
+{
+  "name": "pokeuiki",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "@types/jsonwebtoken": "^9.0.10"
+  },
+  "peerDependencies": {
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.3"
+  },
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "db:up": "docker compose up -d",
+    "db:migrate": "bun db/migrate.ts",
+    "db:seed": "bun db/seed.ts",
+    "db:reset": "bun db/reset.ts",
+    "db:import": "bun db/import-pokeapi.ts",
+    "db:import:base": "bun db/import-pokeapi.ts --sem-formas",
+    "db:presets": "bun db/seed-presets.ts"
+  }
+}
