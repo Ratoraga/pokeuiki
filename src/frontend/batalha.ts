@@ -1,5 +1,5 @@
 import { BOT_USERNAME } from "../shared/api";
-import { chooseAction, chooseReplacement } from "../shared/battle/ai";
+import { chooseAction, chooseReplacement, setBotLevel, type BotLevel } from "../shared/battle/ai";
 import { Z_CRYSTALS, Z_MOVE_NAMES, isSupported } from "../shared/battle/data";
 import {
   activeMon, canDynamax, canGigantamax, canMega, canSwitch, canTera, canZ, createBattle, effMove,
@@ -65,6 +65,7 @@ function startBattle(box: HTMLElement, player: BattleTeamData, bot: BattleTeamDa
   let state: BattleState = init.state;
   let log: string[] = init.log;
   let gimmick: Gimmick | null = null;
+  let thinking = false;
   let gmax = false;
   let teraType = "normal";
 
@@ -82,13 +83,25 @@ function startBattle(box: HTMLElement, player: BattleTeamData, bot: BattleTeamDa
   const commit = (next: BattleState, lines: string[]) => { state = next; log = [...log, ...lines]; gimmick = null; gmax = false; render(); };
 
   function act(action: Action) {
+    if (thinking) return;
     const me = activeMon(state, 0);
     const mustPick = state.pending[0] || state.pivot === 0;
     const canAct = state.winner === null && !mustPick && !me.fainted;
     if (!canAct && !(action.kind === "move" && me.v.recharge)) return;
-    const turn = playTurn(state, [action, chooseAction(state, 1, Math.random)], Math.random);
-    const lines = [...turn.log];
-    commit(settle(turn.state, lines), lines);
+    thinking = true;
+    render();
+    setTimeout(() => {
+      try {
+        const turn = playTurn(state, [action, chooseAction(state, 1, Math.random)], Math.random);
+        const lines = [...turn.log];
+        thinking = false;
+        commit(settle(turn.state, lines), lines);
+      } catch (e) {
+        thinking = false;
+        log = [...log, `Erro na batalha: ${errorMessage(e)}`];
+        render();
+      }
+    }, 30);
   }
   function pickReplacement(to: number) {
     const r = state.pivot === 0 ? resumePivot(state, 0, to, Math.random) : replaceFainted(state, 0, to, Math.random);
@@ -100,7 +113,7 @@ function startBattle(box: HTMLElement, player: BattleTeamData, bot: BattleTeamDa
     const me = activeMon(state, 0), foe = activeMon(state, 1);
     const over = state.winner !== null;
     const mustPick = state.pending[0] || state.pivot === 0;
-    const canAct = !over && !mustPick && !me.fainted;
+    const canAct = !over && !mustPick && !me.fainted && !thinking;
     const usable = new Set(usableMoves(me));
     const recharging = me.v.recharge;
     const crystal = me.item ? Z_CRYSTALS[me.item] : undefined;
@@ -153,7 +166,7 @@ function startBattle(box: HTMLElement, player: BattleTeamData, bot: BattleTeamDa
       ${!over && mustPick ? `<div class="card"><h3>${state.pivot === 0 ? "Escolha quem entra no lugar" : "Escolha o próximo Pokémon"}</h3></div>` : ""}
       ${!over && !mustPick ? `<div class="card"><h3>O que ${esc(monName(me))} vai fazer?</h3>${gimmicksHtml}<div class="move-grid">${moveButtons}</div></div>` : ""}
       ${!over ? `<div class="card"><h3>${mustPick ? "Seus Pokémon" : "Trocar de Pokémon"}</h3><div class="bench">${bench}</div></div>` : ""}
-      <div class="card"><h3>Registro da batalha</h3><div class="battle-log" id="log">${log.map((l) => `<div class="${l.startsWith("—") ? "log-turn" : ""}">${esc(l)}</div>`).join("")}</div></div></section>`;
+      <div class="card"><h3>Registro da batalha</h3>${thinking ? '<p class="muted">O bot está pensando...</p>' : ""}<div class="battle-log" id="log">${log.map((l) => `<div class="${l.startsWith("—") ? "log-turn" : ""}">${esc(l)}</div>`).join("")}</div></div></section>`;
     const el = $("#log");
     if (el) el.scrollTop = el.scrollHeight;
   }
@@ -196,6 +209,7 @@ async function main() {
   let botChoice: number | "random" = "random";
   let error = "";
   let loading = false;
+  let level: BotLevel = "hard";
 
   const option = (t: Team, group: string, checked: boolean) => `<label class="team-option ${checked ? "selected" : ""}">
     <input type="radio" name="${group}" value="${t.id}" ${checked ? "checked" : ""}><div><strong>${esc(t.name)}</strong>
@@ -216,12 +230,19 @@ async function main() {
         <div class="card"><h3>Time do bot</h3>
           <label class="team-option ${botChoice === "random" ? "selected" : ""}"><input type="radio" name="bot" value="random" ${botChoice === "random" ? "checked" : ""}><strong>Aleatório (prontos e seus)</strong></label>
           ${list("bot", (id) => botChoice === id)}</div></div>
+      <label class="form" style="max-width:380px">Dificuldade do bot
+        <select id="level">
+          <option value="normal" ${level === "normal" ? "selected" : ""}>Normal (regras, instantâneo)</option>
+          <option value="hard" ${level === "hard" ? "selected" : ""}>Difícil (simula o próximo turno)</option>
+          <option value="master" ${level === "master" ? "selected" : ""}>Mestre (simula dois turnos)</option>
+        </select></label>
       ${error ? `<p class="error">${esc(error)}</p>` : ""}
       <div class="actions"><button class="primary" id="start" ${loading || playerChoice === null || presets.length === 0 ? "disabled" : ""}>${loading ? "Carregando..." : "Começar batalha"}</button></div></section>`;
   }
 
   box.onchange = (e) => {
     const t = e.target;
+    if (t instanceof HTMLSelectElement && t.id === "level") { level = t.value as BotLevel; return; }
     if (!(t instanceof HTMLInputElement) || t.type !== "radio") return;
     if (t.name === "player") playerChoice = Number(t.value);
     if (t.name === "bot") botChoice = t.value === "random" ? "random" : Number(t.value);
@@ -241,6 +262,7 @@ async function main() {
       setMoveCatalog(catalog);
       loading = false;
       box.onchange = null;
+      setBotLevel(level);
       startBattle(box, player, bot, () => location.reload());
     } catch (err) {
       loading = false;

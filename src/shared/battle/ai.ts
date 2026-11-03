@@ -2,9 +2,11 @@ import { isDamaging, specOf } from "./data";
 import {
   activeMon, at, avgHits, calcDamageBetween, canDynamax, canInflict, canMega, canSwitch, canTera, canZ,
   effMove, effSpeedOf, fixedDamage, moveEffectiveness, otherSide, statusFromAilment, targetsSelf,
-  toStageKey, usableMoves, weatherActive, canGigantamax
+  toStageKey, usableMoves, weatherActive, canGigantamax, legalActions, playTurn, replaceFainted,
+  resumePivot, typeMult
 } from "./engine";
-import type { Action, BattleMoveData, BattleState, Mon, Rng, SideIndex } from "./types";
+import type { Action, BattleMoveData, BattleState, Mon, Rng, SideIndex, MoveAction, Status } from "./types";
+import { TYPES } from "../pokemonTypes";
 
 const sashProtected = (m: Mon) => (m.item === "focus-sash" || m.ability === "sturdy") && m.hp === m.maxHp;
 
@@ -235,7 +237,7 @@ function pickGimmick(s: BattleState, side: SideIndex, moveIndex: number): Pick<E
   return {};
 }
 
-export function chooseAction(s: BattleState, side: SideIndex, rng: Rng): Action {
+export function chooseHeuristic(s: BattleState, side: SideIndex, rng: Rng): Action {
   const me = activeMon(s, side);
   const foe = activeMon(s, otherSide(side));
   if (me.v.recharge) return { kind: "move", index: -1 };
@@ -260,7 +262,7 @@ export function chooseAction(s: BattleState, side: SideIndex, rng: Rng): Action 
 }
 
 /** Escolhe o substituto (após desmaio ou U-turn). */
-export function chooseReplacement(s: BattleState, side: SideIndex): number {
+export function chooseReplacementHeuristic(s: BattleState, side: SideIndex): number {
   let bestIndex = -1, bestValue = -Infinity;
   s.sides[side].team.forEach((m, i) => {
     if (m.fainted || i === s.sides[side].active) return;
@@ -269,4 +271,283 @@ export function chooseReplacement(s: BattleState, side: SideIndex): number {
   });
   if (bestIndex < 0) throw new Error("Sem Pokémon disponível para entrar");
   return bestIndex;
+}
+
+// ===============================================================
+// Busca por simulação (níveis Difícil e Mestre)
+// ===============================================================
+export type BotLevel = "normal" | "hard" | "master";
+let LEVEL: BotLevel = "hard";
+export function setBotLevel(level: BotLevel): void { LEVEL = level; }
+
+const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+const clampN = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+const isSwitch = (a: Action): a is Extract<Action, { kind: "switch" }> => a.kind === "switch";
+const isMove = (a: Action): a is MoveAction => a.kind === "move";
+
+/** Sorteio com semente: todas as jogadas são comparadas com os mesmos "dados". */
+function mulberry32(seed: number): Rng {
+  let t = seed >>> 0;
+  return () => {
+    t = (t + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- avaliação de um estado (do ponto de vista de `side`) ----------
+const STATUS_PEN: Record<Status, number> = { slp: 0.4, frz: 0.45, par: 0.2, brn: 0.2, psn: 0.12, tox: 0.2 };
+
+function evaluate(s: BattleState, side: SideIndex): number {
+  if (s.winner !== null) return s.winner === side ? 50 : -50;
+  const power = (m: Mon) => m.data.stats.hp / 2 + m.data.stats.atk + m.data.stats.def + m.data.stats.spa + m.data.stats.spd + m.data.stats.spe;
+  const all = [...s.sides[0].team, ...s.sides[1].team];
+  const avg = all.reduce((n, m) => n + power(m), 0) / all.length;
+
+  const sideScore = (sd: SideIndex): number => {
+    const st = s.sides[sd];
+    let total = 0;
+    let bench = 0;
+    st.team.forEach((m, i) => {
+      if (m.fainted) return;
+      const w = power(m) / avg;
+      let v = w * (0.15 + 0.85 * (m.hp / m.maxHp)) * (1 - (m.status ? STATUS_PEN[m.status] : 0));
+      if (i === st.active) {
+        const g = m.stages;
+        v += w * clampN(0.06 * Math.max(g.atk, g.spa) + 0.05 * g.spe + 0.025 * (g.def + g.spd), -0.3, 0.45);
+        if (m.v.substitute > 0) v += 0.08 * w;
+        if (m.v.confusion > 0) v -= 0.05 * w;
+        if (m.v.leechSeed) v -= 0.1 * w;
+        if (m.v.perish > 0) v -= 0.3 * w;
+        if (m.v.recharge) v -= 0.1 * w;
+        if (m.v.dynamax > 0) v += 0.15 * w;
+      } else bench++;
+      total += v;
+    });
+    const h = st.hazards;
+    total -= bench * (0.12 * (h.stealthRock ? 1 : 0) + 0.05 * h.spikes + 0.04 * h.toxicSpikes + 0.03 * (h.stickyWeb ? 1 : 0));
+    total += 0.08 * ((st.screens.reflect > 0 ? 1 : 0) + (st.screens.lightScreen > 0 ? 1 : 0) + (st.screens.auroraVeil > 0 ? 1 : 0));
+    if (st.tailwind > 0) total += 0.1;
+    if (st.wish) total += 0.1;
+    return total;
+  };
+  return sideScore(side) - sideScore(otherSide(side));
+}
+
+// ---------- simulação ----------
+function resolveForced(start: BattleState, rng: Rng): BattleState {
+  let s = start;
+  for (let guard = 0; guard < 8 && s.winner === null; guard++) {
+    if (s.pivot !== null) {
+      const sd = s.pivot;
+      let to = -1;
+      try { to = chooseReplacementHeuristic(s, sd); } catch { break; }
+      s = resumePivot(s, sd, to, rng).state;
+      continue;
+    }
+    const sd: SideIndex | null = s.pending[0] ? 0 : s.pending[1] ? 1 : null;
+    if (sd === null) break;
+    let to = -1;
+    try { to = chooseReplacementHeuristic(s, sd); } catch { break; }
+    s = replaceFainted(s, sd, to, rng).state;
+  }
+  return s;
+}
+
+function simulate(s: BattleState, side: SideIndex, mine: Action, theirs: Action, seed: number, twoPly: boolean): number {
+  const rng = mulberry32(seed);
+  try {
+    const actions: [Action, Action] = side === 0 ? [mine, theirs] : [theirs, mine];
+    let cur = resolveForced(playTurn(s, actions, rng).state, rng);
+    if (twoPly && cur.winner === null) {
+      const a0 = chooseHeuristic(cur, 0, rng);
+      const a1 = chooseHeuristic(cur, 1, rng);
+      cur = resolveForced(playTurn(cur, [a0, a1], rng).state, rng);
+    }
+    return evaluate(cur, side);
+  } catch {
+    return 0;
+  }
+}
+
+// ---------- jogadas candidatas ----------
+function threatType(s: BattleState, side: SideIndex): string | null {
+  const foeSide = otherSide(side);
+  const foe = activeMon(s, foeSide);
+  const me = activeMon(s, side);
+  let top = -1, type: string | null = null;
+  for (const i of usableMoves(foe)) {
+    const m = at(foe.data.moves, i);
+    if (!isDamaging(m)) continue;
+    const e = estimate(s, foe, foeSide, me, side, m);
+    if (e.avg > top) { top = e.avg; type = m.type; }
+  }
+  return type;
+}
+
+/** Variações de Mega, Tera, Dynamax e Z que vale a pena simular para um golpe. */
+function gimmickVariants(s: BattleState, side: SideIndex, index: number): Partial<MoveAction>[] {
+  if (canMega(s, side)) return [{ gimmick: "mega" }];
+  const me = activeMon(s, side);
+  const foeSide = otherSide(side);
+  const foe = activeMon(s, foeSide);
+  const out: Partial<MoveAction>[] = [{}];
+  if (index >= 0 && canZ(s, side, index)) out.push({ gimmick: "z" });
+  if (canDynamax(s, side)) out.push({ gimmick: "dynamax", gmax: canGigantamax(s, side) });
+  if (canTera(s, side)) {
+    const types = new Set<string>();
+    let top = -1, offensive = "";
+    for (const i of usableMoves(me)) {
+      const m = at(me.data.moves, i);
+      if (!isDamaging(m) || !me.baseTypes.includes(m.type)) continue;
+      const e = estimate(s, me, side, foe, foeSide, m);
+      if (e.avg > top) { top = e.avg; offensive = m.type; }
+    }
+    if (offensive) types.add(offensive);
+    const threat = threatType(s, side);
+    if (threat) {
+      let bestT = "", bestM = Infinity;
+      for (const t of TYPES) { const mm = typeMult(threat, [t]); if (mm < bestM) { bestM = mm; bestT = t; } }
+      if (bestT) types.add(bestT);
+    }
+    if (s.sides[side].team.filter((m) => !m.fainted).length <= 2) types.add("stellar");
+    for (const t of [...types].slice(0, 3)) out.push({ gimmick: "tera", teraType: t });
+  }
+  return out;
+}
+
+function myCandidates(s: BattleState, side: SideIndex): Action[] {
+  const legal = legalActions(s, side);
+  const ranked = legal.filter(isMove)
+    .map((a) => ({ a, score: a.index >= 0 ? scoreMove(s, side, a.index) : 0 }))
+    .sort((x, y) => y.score - x.score);
+
+  const out: Action[] = [];
+  ranked.forEach(({ a }, rank) => {
+    const variants: Partial<MoveAction>[] = rank < 2 ? gimmickVariants(s, side, a.index) : canMega(s, side) ? [{ gimmick: "mega" }] : [{}];
+    for (const v of variants) out.push({ ...a, ...v } as Action);
+  });
+
+  const switches = legal.filter(isSwitch)
+    .map((a) => ({ a, v: matchup(s, side, at(s.sides[side].team, a.to)) }))
+    .sort((x, y) => y.v - x.v)
+    .slice(0, 3)
+    .map((x) => x.a);
+  return [...out, ...switches];
+}
+
+/** Respostas prováveis do adversário e o quanto cada uma é provável. */
+function theirCandidates(s: BattleState, side: SideIndex): { actions: Action[]; prior: number[] } {
+  const foeSide = otherSide(side);
+  const legal = legalActions(s, foeSide);
+  const moves = legal.filter(isMove).map((a): Action => (canMega(s, foeSide) ? { ...a, gimmick: "mega" } : a));
+  const switches = legal.filter(isSwitch)
+    .map((a) => ({ a, v: matchup(s, foeSide, at(s.sides[foeSide].team, a.to)) }))
+    .sort((x, y) => y.v - x.v)
+    .slice(0, 2)
+    .map((x) => x.a);
+
+  const scores = legal.filter(isMove).map((a) => (a.index >= 0 ? scoreMove(s, foeSide, a.index) : 0));
+  const top = Math.max(0, ...scores);
+  const raw = [...scores.map((x) => Math.exp((x - top) / 12)), ...switches.map(() => Math.exp(-30 / 12))];
+  const total = sum(raw) || 1;
+  return { actions: [...moves, ...switches], prior: raw.map((x) => x / total) };
+}
+
+// ---------- equilíbrio do jogo de matriz (Hedge) ----------
+function equilibriumCols(M: number[][], iters = 500): number[] {
+  const R = M.length;
+  const C = M[0]?.length ?? 0;
+  if (C === 0) return [];
+  let lo = Infinity, hi = -Infinity;
+  for (const row of M) for (const v of row) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const span = hi - lo || 1;
+  const N = M.map((row) => row.map((v) => (v - lo) / span));
+  const eta = 0.25;
+  let wr = new Array<number>(R).fill(1);
+  let wc = new Array<number>(C).fill(1);
+  const avgC = new Array<number>(C).fill(0);
+
+  for (let t = 0; t < iters; t++) {
+    const sr = sum(wr), sc = sum(wc);
+    const p = wr.map((x) => x / sr);
+    const q = wc.map((x) => x / sc);
+    q.forEach((x, j) => { avgC[j] = (avgC[j] ?? 0) + x; });
+    wr = wr.map((w, i) => w * Math.exp(eta * sum((N[i] ?? []).map((v, j) => v * (q[j] ?? 0)))));
+    wc = wc.map((w, j) => w * Math.exp(-eta * sum(N.map((row, i) => (row[j] ?? 0) * (p[i] ?? 0)))));
+    const mr = Math.max(...wr), mc = Math.max(...wc);
+    wr = wr.map((x) => x / mr);
+    wc = wc.map((x) => x / mc);
+  }
+  const total = sum(avgC) || 1;
+  return avgC.map((x) => x / total);
+}
+
+function searchAction(s: BattleState, side: SideIndex, rng: Rng): Action {
+  const rows = myCandidates(s, side);
+  if (rows.length <= 1) return rows[0] ?? chooseHeuristic(s, side, rng);
+
+  const { actions: cols, prior } = theirCandidates(s, side);
+  const master = LEVEL === "master";
+  const samples = master ? 3 : 2;
+  const deadline = performance.now() + (master ? 3500 : 1800);
+  const sums: number[][] = rows.map(() => cols.map(() => 0));
+  const seed = Math.floor(rng() * 1e9);
+  let done = 0;
+
+  for (let k = 0; k < samples; k++) {
+    rows.forEach((r, i) => {
+      const line = sums[i] as number[];
+      cols.forEach((c, j) => { line[j] = (line[j] ?? 0) + simulate(s, side, r, c, seed + k * 7919, master); });
+    });
+    done++;
+    if (performance.now() > deadline) break; // a primeira rodada sempre termina
+  }
+
+  const M = sums.map((line) => line.map((v) => v / done));
+  const eq = equilibriumCols(M);
+  const mix = master ? 0.5 : 0.35; // quanto confiar no equilíbrio em vez do que um jogador razoável faria
+  const q = cols.map((_, j) => mix * (eq[j] ?? 0) + (1 - mix) * (prior[j] ?? 0));
+
+  let best = 0, bestV = -Infinity;
+  rows.forEach((_, i) => {
+    const v = sum((M[i] ?? []).map((x, j) => x * (q[j] ?? 0))) + rng() * 1e-3;
+    if (v > bestV) { bestV = v; best = i; }
+  });
+  return at(rows, best);
+}
+
+export function chooseAction(s: BattleState, side: SideIndex, rng: Rng): Action {
+  if (LEVEL === "normal") return chooseHeuristic(s, side, rng);
+  try { return searchAction(s, side, rng); } catch { return chooseHeuristic(s, side, rng); }
+}
+
+/** Escolhe o substituto (após desmaio ou U-turn) olhando o confronto que ele vai enfrentar. */
+export function chooseReplacement(s: BattleState, side: SideIndex): number {
+  if (LEVEL === "normal") return chooseReplacementHeuristic(s, side);
+  const bench: number[] = [];
+  s.sides[side].team.forEach((m, i) => { if (!m.fainted && i !== s.sides[side].active) bench.push(i); });
+  if (bench.length <= 1) return bench[0] ?? chooseReplacementHeuristic(s, side);
+
+  let best = -1, bestV = -Infinity;
+  for (const i of bench) {
+    const rng = mulberry32(4242 + i);
+    let v = 0;
+    try {
+      const r = s.pivot === side ? resumePivot(s, side, i, rng) : replaceFainted(s, side, i, rng);
+      const cur = resolveForced(r.state, rng);
+      if (cur.winner !== null) v = cur.winner === side ? 50 : -50;
+      else {
+        const mine = chooseHeuristic(cur, side, rng);
+        const { actions } = theirCandidates(cur, side);
+        const vals = actions.map((a, k) => simulate(cur, side, mine, a, 1000 + k, false)).sort((x, y) => x - y);
+        const worst = vals[0] ?? 0;
+        const low = vals.slice(0, 2);
+        v = 0.5 * worst + 0.5 * (sum(low) / Math.max(1, low.length)); // pesa mais as piores respostas
+      }
+    } catch { continue; }
+    if (v > bestV) { bestV = v; best = i; }
+  }
+  return best >= 0 ? best : chooseReplacementHeuristic(s, side);
 }
