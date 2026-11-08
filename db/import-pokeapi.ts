@@ -199,6 +199,15 @@ interface PokemonResponse {
   moves: { move: NamedRef }[];
 }
 
+async function importGenders() {
+  console.log("Importando proporção de gêneros...");
+  const list = await getJson<NamedList>(`${API}/pokemon-species?limit=100000`);
+  await mapPool(list.results, "gêneros", async (ref) => {
+    const sp = await getJson<{ id: number; gender_rate: number }>(ref.url);
+    await sql`UPDATE pokemon SET gender_rate = ${sp.gender_rate} WHERE species_id = ${sp.id}`;
+  });
+}
+
 async function importPokemon() {
   console.log("Importando Pokémon e formas (isso demora alguns minutos)...");
   const list = await getJson<NamedList>(`${API}/pokemon?limit=100000`);
@@ -342,6 +351,7 @@ await importItems();
 await importPokemon();
 await importAbilities();
 await importEvolutions();
+await importGenders();
 
 console.log("Importação concluída.");
 await sql.close();

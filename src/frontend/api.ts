@@ -71,6 +71,8 @@ async function request<T>(
   return data as T;
 }
 
+export interface Contact { username: string; public_teams: number; added_at: string }
+
 export const api = {
   register: (username: string, email: string, password: string) =>
     request<{ id: number; username: string; email: string }>("/auth/register", {
@@ -91,11 +93,16 @@ export const api = {
   teamsOfUser: (username: string) =>
     request<Team[]>(`/users/${encodeURIComponent(username)}/teams`),
 
+  listContacts: () => request<Contact[]>("/contacts"),
+  addContact: (username: string) => request<{ username: string }>("/contacts", { method: "POST", body: { username } }),
+  removeContact: (username: string) => request<void>(`/contacts/${encodeURIComponent(username)}`, { method: "DELETE" }),
+  
   createTeam: (input: {
     name: string;
     description?: string;
     is_public: boolean;
     pokemon: number[];
+    genders?: ("M" | "F" | null)[];
   }) => request<{ id: number; name: string }>("/teams", { method: "POST", body: input }),
 
   deleteTeam: (id: number) => request<void>(`/teams/${id}`, { method: "DELETE" }),

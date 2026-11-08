@@ -1,20 +1,32 @@
+import { genderRel } from "../gender";
 import { defenseAdjust, effectiveMoveType } from "../modifiers";
 import { TYPES } from "../pokemonTypes";
 import * as AB from "./abilities";
 import {
   BALL, FLING_POWER, METRONOME_BANNED, MAX_BY_NAME, MAX_MOVES, NORMAL_MAX, TYPE_BOOST_ITEMS, WEATHER_BALL_TYPE,
   Z_CRYSTALS, Z_MOVE_NAMES, isComplexSpec, isContact, isDamaging, isPermanentWeather, isSupported, maxPower,
-  specOf, wxBase, zPower, type MoveSpec, GMAX_BY_NAME, GMAX_MOVES, NATURAL_GIFT
+  specOf, wxBase, zPower, type MoveSpec, GMAX_BY_NAME, GMAX_MOVES, NATURAL_GIFT, DANCE, PLATE_TYPES, WIND,
+  SOUND, BERRY_HEAL, PICKY_BERRY, CURE_BERRY, PINCH_STAT_BERRY, RESIST_BERRY
 } from "./data";
 import type {
   Action, BattleMonData, BattleMoveData, BattleState, ChartRow, Mon, MoveAction, Rng, SideIndex,
   SideState, StageKey, StatKey5, Status, Terrain, Volatile, Weather,
 } from "./types";
+import { NATURES } from "../stats";
 
 // ---------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------
 const DYNAMAX_HP = 2;
+const itemsOff = (s: BattleState, m: Mon): boolean => m.v.embargo > 0 || s.field.magicRoom > 0 || m.ability === "klutz";
+const UNNERVE = ["unnerve", "as-one-glastrier", "as-one-spectrier"];
+const dislikes = (m: Mon, key: string): boolean => {
+  const n = m.data.nature ? NATURES[m.data.nature] : undefined;
+  return !!n && n.minus === key;
+};
+const isAsleep = (m: Mon): boolean => m.status === "slp" || m.ability === "comatose";
+const OPP_GUARD = { on: false };
+const PERMANENT_FORMS = new Set(["ash", "core", "complete", "hero"]);
 let CHART = new Map<string, number>();
 export function setTypeChart(rows: ChartRow[]): void {
   CHART = new Map<string, number>(rows.map((r) => [`${r.attacker}>${r.defender}`, r.multiplier] as [string, number]));
@@ -84,7 +96,7 @@ const newVolatile = (): Volatile => ({
   noSwitch: false, lockOn: false, levitate: 0, smackedDown: false, identified: false, electrified: false,
   powdered: false, magicCoat: false, charged: false, loafing: false, berry: null, dynamax: 0, gasSaved: null,
   bide: null, stockpile: 0, laserFocus: 0, octolock: false, snatch: false, imprisoned: [], grudge: false,
-  lastItem: null, embargo: 0, itemSaved: null, gmaxDot: null, glaive: false, hitsTaken: 0, saltCure: false,
+  lastItem: null, embargo: 0, itemSaved: null, gmaxDot: null, glaive: false, hitsTaken: 0, saltCure: false, cud: null,
 });
 
 export const stageMult = (stage: number) => (stage >= 0 ? (2 + stage) / 2 : 2 / (2 - stage));
@@ -102,6 +114,7 @@ export function isGrounded(s: BattleState, m: Mon): boolean {
 }
 export function weatherActive(s: BattleState): Weather | null {
   if (!s.field.weather) return null;
+  if (s.weatherOff) return null;
   for (const side of [0, 1] as const) {
     const m = activeMon(s, side);
     if (!m.fainted && (m.ability === "cloud-nine" || m.ability === "air-lock")) return null;
@@ -201,6 +214,8 @@ function resolveType(s: BattleState, att: Mon, move: BattleMoveData): string {
   if (att.v.electrified) return "electric";
   if (spec.power === "weatherBall") { const w = weatherActive(s); return w ? WEATHER_BALL_TYPE[w] : "normal"; }
   if (spec.teraBlast && att.tera) return att.tera;
+  if (move.name === "aura-wheel") return att.flags.hangry ? "dark" : "electric";
+  if ((move.name === "judgment" || move.name === "multi-attack") && (att.ability === "multitype" || att.ability === "rks-system")) return att.types[0] ?? "normal";
   const ng = spec.power === "naturalGift" && att.item ? NATURAL_GIFT[att.item] : undefined;
   if (ng) return ng[0];
   let t = att.ability === "liquid-voice" && AB_SOUND(move) ? "water" : effectiveMoveType(move.type, att.ability);
@@ -222,6 +237,7 @@ function typeEffect(s: BattleState, att: Mon, def: Mon, type: string): number {
   let base = 1;
   for (const t of types) {
     let m = CHART.get(`${type}>${t}`) ?? 1;
+    if (att.flags.micle) m *= 1.2;
     if (winds && t === "flying" && m > 1) m = 1;
     base *= m;
   }
@@ -287,22 +303,23 @@ function basePower(
   }
 }
 
-export interface DmgResult { min: number; max: number; eff: number; type: string }
+export interface DmgResult { min: number; max: number; eff: number; type: string; rolls: number[] }
 
 export function calcDamageBetween(
   s: BattleState, att: Mon, attSide: SideIndex, def: Mon, defSide: SideIndex,
-  move: BattleMoveData, o: { crit?: boolean; hit?: number; z?: boolean; power?: number } = {}
+  move: BattleMoveData, o: { crit?: boolean; hit?: number; z?: boolean; power?: number; powerMult?: number; finalMult?: number } = {}
 ): DmgResult {
   const spec = specOf(move);
   const type = resolveType(s, att, move);
   const ignore = AB.ignoresAbility(att);
   const eff = typeEffect(s, att, def, type);
-  const none = { min: 0, max: 0, eff, type };
+  const none = { min: 0, max: 0, eff, type, rolls: new Array<number>(16).fill(0) };
   if (eff === 0) return none;
 
   const w = att.ability === "mega-sol" ? "sun" : baseWx(s);
     let power = o.power ?? (o.z ? zPower(move.power ?? 100) : basePower(s, att, attSide, def, defSide, move, spec, o.hit ?? 0));
   if (power <= 0) return none;
+  const baseBp = power;
 
   if (w === "sun") power *= type === "fire" ? 1.5 : type === "water" ? (move.name === "hydro-steam" ? 1.5 : 0.5) : 1; type === "fire" ? 1.5 : type === "water" ? 0.5 : 1;
   if (w === "rain") power *= type === "water" ? 1.5 : type === "fire" ? 0.5 : 1;
@@ -317,13 +334,22 @@ export function calcDamageBetween(
   if (move.name === "psyblade" && s.field.terrain === "electric") power *= 1.5;
 
   const auras = [att, def];
-  if (auras.some((m) => m.ability === "dark-aura") && type === "dark") power *= auras.some((m) => m.ability === "aura-break") ? 0.75 : 1.33;
-  if (auras.some((m) => m.ability === "fairy-aura") && type === "fairy") power *= auras.some((m) => m.ability === "aura-break") ? 0.75 : 1.33;
+  const brk = !!s.field.auras?.break || auras.some((m) => m.ability === "aura-break");
+  if ((!!s.field.auras?.dark || auras.some((m) => m.ability === "dark-aura")) && type === "dark") power *= brk ? 0.75 : 1.33;
+  if ((!!s.field.auras?.fairy || auras.some((m) => m.ability === "fairy-aura")) && type === "fairy") power *= brk ? 0.75 : 1.33;
 
   power *= AB.powerMult(att, move, type, {
-    weather: w, movedLast: s.moved[defSide], converted: type !== move.type, hasSecondary: hasSecondary(move), power,
+    weather: w,
+    movedLast: s.moved[defSide],
+    converted: type !== move.type,
+    hasSecondary: hasSecondary(move),
+    power: baseBp,
+    fainted: s.sides[attSide].team.filter((m) => m.fainted).length,
+    gender: genderRel(att, def),
   });
   if (att.item && TYPE_BOOST_ITEMS[att.item] === type) power *= 1.2;
+  power *= o.powerMult ?? 1;
+  power *= s.mods?.power ?? 1;
   power = Math.max(1, Math.floor(power));
 
   let physical = move.damage_class === "physical";
@@ -343,10 +369,11 @@ export function calcDamageBetween(
 
   let A = statValue(s, atkOwner, atkKey, aStage);
   let D = Math.max(1, statValue(s, def, defKey, dStage));
-  if (def.ability === "tablets-of-ruin" && atkKey === "atk") A *= 0.75;
-  if (def.ability === "vessel-of-ruin" && atkKey === "spa") A *= 0.75;
-  if (att.ability === "sword-of-ruin" && defKey === "def") D *= 0.75;
-  if (att.ability === "beads-of-ruin" && defKey === "spd") D *= 0.75;
+  const ruin = s.field.ruin;
+  if ((def.ability === "tablets-of-ruin" || (ruin?.tablets && att.ability !== "tablets-of-ruin")) && atkKey === "atk") A *= 0.75;
+  if ((def.ability === "vessel-of-ruin" || (ruin?.vessel && att.ability !== "vessel-of-ruin")) && atkKey === "spa") A *= 0.75;
+  if ((att.ability === "sword-of-ruin" || (ruin?.sword && def.ability !== "sword-of-ruin")) && defKey === "def") D *= 0.75;
+  if ((att.ability === "beads-of-ruin" || (ruin?.beads && def.ability !== "beads-of-ruin")) && defKey === "spd") D *= 0.75;
 
   let base = Math.floor(Math.floor(((Math.floor((2 * att.data.level) / 5) + 2) * power * A) / D) / 50) + 2;
   if (o.crit) base = Math.floor(base * AB.critMult(att));
@@ -361,9 +388,15 @@ export function calcDamageBetween(
   mod *= AB.defenderDamageMult(def, att, move, eff, ignore) * AB.attackerDamageMult(att, eff);
   if (att.item === "life-orb") mod *= 1.3;
   if (att.item === "expert-belt" && eff > 1) mod *= 1.2;
+  const rb = def.item && !itemsOff(s, def) && !UNNERVE.includes(att.ability ?? "") ? RESIST_BERRY[def.item] : undefined;
+  if (rb === type && (eff > 1 || def.item === "chilan-berry") && (o.hit ?? 0) === 0)
+    mod *= def.ability === "ripen" ? 0.25 : 0.5;
 
-  const calc = (roll: number) => Math.max(1, Math.floor(Math.floor(base * roll) * mod));
-  return { min: calc(0.85), max: calc(1), eff, type };
+  mod *= o.finalMult ?? 1;
+  mod *= s.mods?.final ?? 1;
+  const calc = (percent: number) => Math.max(1, Math.floor(Math.floor((base * percent) / 100) * mod));
+  const rolls = Array.from({ length: 16 }, (_, i) => calc(85 + i));
+  return { min: calc(85), max: calc(100), eff, type, rolls };
 }
 
 export function fixedDamage(att: Mon, def: Mon, rule: NonNullable<MoveSpec["fixed"]>, rng: Rng): number {
@@ -387,7 +420,8 @@ export function createMon(data: BattleMonData): Mon {
     ability: data.ability, item: data.item, stats: { ...data.stats },
     hp: data.stats.hp, maxHp: data.stats.hp, baseMaxHp: data.stats.hp, status: null, toxCount: 0, sleepLeft: 0,
     stages: zeroStages(), ppLeft: data.moves.map((m) => m.pp), turnsOut: 0, fainted: false,
-    tera: null, stellarUsed: [], mega: false, flags: {}, original: null, v: newVolatile(),
+    gender: data.gender ?? null,
+    tera: null, stellarUsed: [], mega: false, flags: {}, original: null, v: newVolatile(), form: null,
   };
 }
 
@@ -409,9 +443,11 @@ export function createBattle(teams: [BattleMonData[], BattleMonData[]]): { state
     pending: [false, false], pivot: null, baton: null, passSub: 0, moved: [false, false],
     lastWasSwitch: [false, false], lastMoveUsed: null, winner: null, ctx: null,
   };
+    for (const sd of [0, 1] as const) for (const m of state.sides[sd].team) if (m.ability === "illusion") m.flags.illusion = true;
   const log: string[] = [];
   for (const side of [0, 1] as const) log.push(`${SIDE_LABEL[side]} enviou ${monName(activeMon(state, side))}!`);
   for (const side of [0, 1] as const) entryAbility(state, side, new Rng0(), log);
+  for (const side of [0, 1] as const) checkBooster(state, activeMon(state, side), log);
   syncGas(state);
   return { state, log };
 }
@@ -496,14 +532,14 @@ export const canZ = (s: BattleState, side: SideIndex, index: number) => {
 // ---------------------------------------------------------------
 // Efeitos básicos
 // ---------------------------------------------------------------
-function hurt(m: Mon, amount: number): { dealt: number; fainted: boolean } {
+export function hurt(m: Mon, amount: number): { dealt: number; fainted: boolean } {
   const dealt = Math.min(m.hp, Math.max(0, Math.floor(amount)));
   m.hp -= dealt;
   const fainted = m.hp <= 0 && !m.fainted;
   if (fainted) m.fainted = true;
   return { dealt, fainted };
 }
-function heal(m: Mon, amount: number): number {
+export function heal(m: Mon, amount: number): number {
   if (m.v.healBlock > 0) return 0;
   const before = m.hp;
   m.hp = Math.min(m.maxHp, m.hp + Math.max(0, Math.floor(amount)));
@@ -516,7 +552,7 @@ function checkWinner(s: BattleState, loserHint: SideIndex): void {
   else if (d0) s.winner = 1;
   else if (d1) s.winner = 0;
 }
-function announceFaint(s: BattleState, side: SideIndex, m: Mon, log: string[]): void {
+export function announceFaint(s: BattleState, side: SideIndex, m: Mon, log: string[]): void {
   log.push(`${monName(m)} desmaiou!`);
   checkWinner(s, side);
   syncGas(s);
@@ -525,20 +561,107 @@ function announceFaint(s: BattleState, side: SideIndex, m: Mon, log: string[]): 
     if (o !== m && !o.fainted && o.ability === "soul-heart") changeStage(s, o, "spa", 1, log, null);
   }
 }
-function eatBerry(m: Mon, log: string[]): void {
+function berryEffect(s: BattleState, m: Mon, b: string, log: string[], rng: Rng): void {
+  const k = m.ability === "ripen" ? 2 : 1;
+  const mend = (n: number) => { if (heal(m, Math.floor(n * k)) > 0) log.push(`${monName(m)} recuperou HP!`); };
+  const hv = BERRY_HEAL[b], picky = PICKY_BERRY[b], cure = CURE_BERRY[b], stat = PINCH_STAT_BERRY[b];
+  if (hv) mend(hv.hp ?? m.maxHp * (hv.frac ?? 0));
+  else if (picky) {
+    mend(m.maxHp / 3);
+    if (dislikes(m, picky) && m.ability !== "own-tempo" && m.v.confusion === 0) {
+      m.v.confusion = 2 + Math.floor(rng() * 4);
+      log.push(`${monName(m)} ficou confuso por não gostar do sabor!`);
+    }
+  } else if (cure) {
+    if (m.status && cure.includes(m.status)) { m.status = null; m.toxCount = 0; m.v.nightmare = false; log.push(`${monName(m)} foi curado!`); }
+    if ((b === "lum-berry" || b === "persim-berry") && m.v.confusion > 0) { m.v.confusion = 0; log.push(`${monName(m)} saiu da confusão!`); }
+  } else if (stat) changeStage(s, m, stat, k, log, null);
+  else switch (b) {
+    case "starf-berry": {
+      const keys = ["atk", "def", "spa", "spd", "spe"] as const;
+      changeStage(s, m, keys[Math.floor(rng() * keys.length)] ?? "atk", 2 * k, log, null);
+      break;
+    }
+    case "lansat-berry": m.v.focusEnergy = true; log.push(`${monName(m)} ficou pronto para acertos críticos!`); break;
+    case "micle-berry": m.flags.micle = true; m.flags.micleOld = false; break;
+    case "enigma-berry": mend(m.maxHp / 4); break;
+    case "kee-berry": changeStage(s, m, "def", k, log, null); break;
+    case "maranga-berry": changeStage(s, m, "spd", k, log, null); break;
+    case "leppa-berry": {
+      let j = m.ppLeft.findIndex((p) => p <= 0);
+      if (j < 0) j = m.ppLeft.indexOf(Math.min(...m.ppLeft));
+      const max = m.data.moves[j]?.pp ?? 0;
+      m.ppLeft[j] = Math.min(max, (m.ppLeft[j] ?? 0) + 10 * k);
+      log.push(`${monName(m)} recuperou PP!`);
+      break;
+    }
+  }
+}
+
+function eatBerry(s: BattleState, m: Mon, log: string[], rng: Rng = Math.random): void {
   const b = m.item;
   if (!b) return;
-  m.item = null;
-  m.v.berry = b;
-  m.v.lastItem = b;
-  m.flags.ateBerry = true;
-  if (b === "sitrus-berry") heal(m, m.maxHp * (m.ability === "ripen" ? 0.5 : 0.25));
-  else if (b === "lum-berry") m.status = null;
+  m.item = null; m.v.berry = b; m.v.lastItem = b; m.flags.ateBerry = true;
   log.push(`${monName(m)} comeu a ${pretty(b)}!`);
+  berryEffect(s, m, b, log, rng);
   if (m.ability === "cheek-pouch") heal(m, m.maxHp / 3);
 }
 
-function changeStage(s: BattleState, t: Mon, key: StageKey, delta: number, log: string[], source: Mon | null): boolean {
+/** Decide se a berry deve ser comida agora (HP, status ou PP). */
+export function checkBerry(s: BattleState, m: Mon, foe: Mon | null, log: string[], rng: Rng = Math.random): boolean {
+  const b = m.item;
+  if (!b || m.fainted || m.hp <= 0 || itemsOff(s, m)) return false;
+  if (b.endsWith("-berry") && foe && !foe.fainted && UNNERVE.includes(foe.ability ?? "")) return false;
+  const low = m.hp <= m.maxHp * (m.ability === "gluttony" ? 0.5 : 0.25);
+  let eat = false;
+  if (BERRY_HEAL[b]) eat = m.hp <= m.maxHp / 2;
+  else if (PICKY_BERRY[b] || PINCH_STAT_BERRY[b] || b === "starf-berry" || b === "lansat-berry" || b === "micle-berry") eat = low;
+  else if (CURE_BERRY[b]) {
+    const cures = CURE_BERRY[b] ?? [];
+    eat = (!!m.status && cures.includes(m.status)) || ((b === "lum-berry" || b === "persim-berry") && m.v.confusion > 0);
+  } else if (b === "leppa-berry") eat = m.ppLeft.some((p) => p <= 0);
+  if (!eat) return false;
+  eatBerry(s, m, log, rng);
+  return true;
+}
+
+/** Berries disparadas por um golpe: resistência, Enigma, Kee, Maranga, Jaboca e Rowap. */
+function hitBerry(s: BattleState, side: SideIndex, me: Mon, foe: Mon, move: BattleMoveData, type: string, eff: number, total: number, rng: Rng, log: string[]): void {
+  if (total <= 0) return;
+  const b = foe.item;
+  const physical = move.damage_class === "physical";
+  if (b && !itemsOff(s, foe) && !UNNERVE.includes(me.ability ?? "")) {
+    if (RESIST_BERRY[b] === type && (eff > 1 || b === "chilan-berry")) {
+      eatBerry(s, foe, log, rng);
+      log.push("A berry reduziu o dano!");
+    } else if (b === "enigma-berry" && eff > 1 && !foe.fainted && foe.hp < foe.maxHp) eatBerry(s, foe, log, rng);
+    else if (!foe.fainted && ((b === "kee-berry" && physical) || (b === "maranga-berry" && !physical))) eatBerry(s, foe, log, rng);
+    else if ((b === "jaboca-berry" && physical) || (b === "rowap-berry" && !physical)) {
+      eatBerry(s, foe, log, rng);
+      if (!me.fainted && me.ability !== "magic-guard") {
+        const r = hurt(me, Math.max(1, Math.floor(me.maxHp / 8)) * (foe.ability === "ripen" ? 2 : 1));
+        log.push(`${monName(me)} foi ferido pela ${pretty(b)}!`);
+        if (r.fainted) announceFaint(s, side, me, log);
+      }
+    }
+  }
+  checkBerry(s, foe, me, log, rng);
+  checkBerry(s, me, foe, log, rng);
+}
+
+/** Custap Berry: com HP baixo, o dono age primeiro dentro da sua faixa de prioridade. */
+function startOfTurnBerries(s: BattleState, log: string[], rng: Rng): void {
+  for (const side of [0, 1] as const) {
+    const m = activeMon(s, side), foe = activeMon(s, otherSide(side));
+    if (m.item !== "custap-berry" || m.fainted || itemsOff(s, m) || UNNERVE.includes(foe.ability ?? "")) continue;
+    if (m.hp > m.maxHp * (m.ability === "gluttony" ? 0.5 : 0.25)) continue;
+    m.flags.custap = true;
+    eatBerry(s, m, log, rng);
+    log.push(`${monName(m)} vai agir primeiro!`);
+  }
+}
+
+export function changeStage(s: BattleState, t: Mon, key: StageKey, delta: number, log: string[], source: Mon | null): boolean {
   let d = delta;
   if (t.ability === "contrary") d = -d;
   else if (t.ability === "simple") d *= 2;
@@ -552,6 +675,13 @@ function changeStage(s: BattleState, t: Mon, key: StageKey, delta: number, log: 
   if (after === before) { log.push(`${STAGE_LABEL[key]} de ${monName(t)} não pode ${d > 0 ? "subir" : "cair"} mais!`); return false; }
   t.stages[key] = after;
   log.push(`${STAGE_LABEL[key]} de ${monName(t)} ${d > 0 ? "subiu" : "caiu"}${Math.abs(d) >= 2 ? " bastante" : ""}!`);
+  if (d > 0 && !OPP_GUARD.on) {
+    const other = activeMon(s, otherSide(sideOf(s, t)));
+    if (other !== t && other.ability === "opportunist" && !other.fainted) {
+      OPP_GUARD.on = true;
+      try { changeStage(s, other, key, d, log, null); } finally { OPP_GUARD.on = false; }
+    }
+  }
   if (d < 0 && foeMade) {
     if (t.ability === "defiant") changeStage(s, t, "atk", 2, log, null);
     if (t.ability === "competitive") changeStage(s, t, "spa", 2, log, null);
@@ -575,7 +705,8 @@ function inflict(s: BattleState, t: Mon, st: Status, rng: Rng, log: string[], so
   if (st === "slp") t.sleepLeft = t.ability === "early-bird" ? 0 : 1 + Math.floor(rng() * 3);
   if (st === "tox") t.toxCount = 1;
   log.push(`${monName(t)} ${STATUS_MSG[st]}`);
-  if (t.item === "lum-berry") eatBerry(t, log);
+  if (source?.ability === "poison-puppeteer" && (st === "psn" || st === "tox")) confuse(s, t, rng, log);
+  if (checkBerry(s, t, source, log, rng)) { /* berry curou o status */ }
   else if (source && t.ability === "synchronize" && ["par", "brn", "psn", "tox"].includes(st) && canInflict(s, source, st)) inflict(s, source, st, rng, log, null);
 }
 
@@ -593,6 +724,7 @@ function setWeather(s: BattleState, w: Weather, setter: Mon, log: string[]): boo
   s.field.weather = w;
   s.field.weatherTurns = isPermanentWeather(w) ? 9999 : setter.item === WEATHER_ROCK[w] ? 8 : 5;
   log.push(WEATHER_MSG[w]);
+  syncForms(s, log);
   return true;
 }
 function setTerrain(s: BattleState, t: Terrain, setter: Mon, log: string[]): boolean {
@@ -652,9 +784,75 @@ function transformInto(me: Mon, foe: Mon, log: string[]): boolean {
 }
 
 // ---------------------------------------------------------------
+// Mudanças de forma por habilidade
+// ---------------------------------------------------------------
+function changeForm(m: Mon, key: string, log: string[]): void {
+  const f = m.data.forms?.[key];
+  if (!f || m.form === key) return;
+  m.form = key;
+  m.species = f.species;
+  m.types = [...f.types];
+  m.baseTypes = [...f.types];
+  m.stats = { ...f.stats, hp: m.stats.hp };
+  if (f.ability) m.ability = f.ability;
+  log.push(`${monName(m)} mudou de forma!`);
+}
+
+function revertForm(m: Mon, log: string[]): void {
+  const mg = m.mega ? m.data.mega : null;
+  m.form = null;
+  m.species = mg ? mg.species : m.data.species;
+  m.baseTypes = [...(mg ? mg.types : m.data.types)];
+  m.types = m.tera && m.tera !== "stellar" ? [m.tera] : [...m.baseTypes];
+  m.stats = { ...(mg ? mg.stats : m.data.stats), hp: m.stats.hp };
+  m.ability = mg ? mg.ability : m.data.ability;
+  log.push(`${monName(m)} voltou à forma original.`);
+}
+
+/** Reavalia as formas que dependem de HP ou clima (Zen Mode, Schooling, Shields Down, Power Construct, Forecast). */
+export function syncForms(s: BattleState, log: string[]): void {
+  const w = baseWx(s);
+  for (const side of [0, 1] as const) {
+    const m = activeMon(s, side);
+    if (m.fainted) continue;
+    const half = m.hp * 2 <= m.maxHp;
+    switch (m.ability) {
+      case "zen-mode":
+        if (m.data.forms?.zen) { if (half && m.form !== "zen") changeForm(m, "zen", log); else if (!half && m.form === "zen") revertForm(m, log); }
+        break;
+      case "schooling":
+        if (m.data.forms?.school && m.data.level >= 20) {
+          const school = m.hp * 4 > m.maxHp;
+          if (school && m.form !== "school") changeForm(m, "school", log); else if (!school && m.form === "school") revertForm(m, log);
+        }
+        break;
+      case "shields-down": if (half && m.form !== "core") changeForm(m, "core", log); break;
+      case "power-construct": if (half && m.form !== "complete") changeForm(m, "complete", log); break;
+      case "forecast":
+        if (m.data.species.startsWith("castform")) {
+          const t = w === "sun" ? "fire" : w === "rain" ? "water" : w === "snow" || w === "hail" ? "ice" : "normal";
+          m.types = [t]; m.baseTypes = [t];
+        }
+        break;
+      default: break;
+    }
+  }
+}
+
+/** O que a tela deve mostrar do Pokémon ativo: Illusion disfarça o do bot de último Pokémon do time. */
+export function shownMon(s: BattleState, side: SideIndex): { name: string; pokemonId: number; sprite: string | null } {
+  const m = activeMon(s, side);
+  if (m.flags.illusion && side === 1) {
+    const fake = [...s.sides[side].team].reverse().find((x) => !x.fainted && x !== m);
+    if (fake) return { name: monName(fake), pokemonId: fake.data.pokemon_id, sprite: fake.data.sprite };
+  }
+  return { name: monName(m), pokemonId: m.data.pokemon_id, sprite: null };
+}
+
+// ---------------------------------------------------------------
 // Entrada em campo
 // ---------------------------------------------------------------
-function entryAbility(s: BattleState, side: SideIndex, rng: Rng | Rng0, log: string[]): void {
+export function entryAbility(s: BattleState, side: SideIndex, rng: Rng | Rng0, log: string[]): void {
   const me = activeMon(s, side);
   const foe = activeMon(s, otherSide(side));
   if (me.fainted) return;
@@ -666,11 +864,27 @@ function entryAbility(s: BattleState, side: SideIndex, rng: Rng | Rng0, log: str
   if (me.ability === "screen-cleaner") for (const sd of [0, 1] as const) s.sides[sd].screens = { reflect: 0, lightScreen: 0, auroraVeil: 0 };
   if (me.ability === "intrepid-sword" && !me.flags.intrepid) { me.flags.intrepid = true; changeStage(s, me, "atk", 1, log, null); }
   if (me.ability === "dauntless-shield" && !me.flags.dauntless) { me.flags.dauntless = true; changeStage(s, me, "def", 1, log, null); }
+  if (me.ability === "illusion") me.flags.illusion = true;
+  if (me.ability === "klutz") suppressItem(me);
+  if (me.ability === "multitype" && me.item && PLATE_TYPES[me.item]) { const t = PLATE_TYPES[me.item] as string; me.types = [t]; me.baseTypes = [t]; }
+  if (me.ability === "rks-system" && me.item?.endsWith("-memory")) { const t = me.item.replace("-memory", ""); me.types = [t]; me.baseTypes = [t]; }
+  if (me.ability === "tera-shift" && me.form === null) changeForm(me, "terastal", log);
+  if (me.ability === "zero-to-hero" && me.flags.hero && me.form === null) changeForm(me, "hero", log);
+  syncForms(s, log);
   if (foe.fainted) return;
+  if (me.ability === "anticipation" && foe.data.moves.some((mv) => isDamaging(mv) && (specOf(mv).ohko || typeMult(mv.type, defTypes(me)) > 1))) {
+    log.push(`${monName(me)} estremeceu ao sentir o perigo!`);
+  }
+  if (me.ability === "forewarn") {
+    const top = [...foe.data.moves].sort((a, b) => (b.power ?? 0) - (a.power ?? 0))[0];
+    if (top) log.push(`${monName(me)} previu o golpe ${pretty(top.name)}!`);
+  }
+  if (me.ability === "frisk" && foe.item) log.push(`${monName(me)} percebeu que ${monName(foe)} segura ${pretty(foe.item)}!`);
   if (me.ability === "supersweet-syrup" && !me.flags.syrup) { me.flags.syrup = true; changeStage(s, foe, "eva", -1, log, me); }
   if (me.ability === "intimidate") {
     if (foe.ability === "guard-dog") changeStage(s, foe, "atk", 1, log, null);
     else if (!AB.blocksIntimidate(foe)) { log.push(`${monName(me)} intimidou ${monName(foe)}!`); changeStage(s, foe, "atk", -1, log, me); }
+      if (foe.ability === "rattled") changeStage(s, foe, "spe", 1, log, null);
   }
   if (me.ability === "download") changeStage(s, me, foe.stats.def < foe.stats.spd ? "atk" : "spa", 1, log, null);
   if (me.ability === "imposter") transformInto(me, foe, log);
@@ -717,7 +931,7 @@ function endDynamax(m: Mon, log: string[]): void {
   log.push(`${monName(m)} voltou ao tamanho normal.`);
 }
 
-function doSwitch(s: BattleState, side: SideIndex, to: number, rng: Rng, log: string[]): void {
+export function doSwitch(s: BattleState, side: SideIndex, to: number, rng: Rng, log: string[]): void {
   const st = s.sides[side];
   const out = at(st.team, st.active);
   if (!out.fainted) {
@@ -728,15 +942,25 @@ function doSwitch(s: BattleState, side: SideIndex, to: number, rng: Rng, log: st
   if (out.v.dynamax > 0 || out.maxHp !== out.baseMaxHp) endDynamax(out, log);
   activeMon(s, otherSide(side)).v.noSwitch = false;
   activeMon(s, otherSide(side)).v.imprisoned = [];
+  if (out.ability === "zero-to-hero" && !out.fainted) out.flags.hero = true;
+  if (out.form && !PERMANENT_FORMS.has(out.form)) {
+    out.form = null;
+    out.species = out.mega && out.data.mega ? out.data.mega.species : out.data.species;
+    out.baseTypes = out.mega && out.data.mega ? [...out.data.mega.types] : [...out.data.types];
+  }
   if (out.original) {
     const o = out.original;
     out.data = o.data; out.species = o.species; out.types = o.types; out.baseTypes = o.baseTypes;
     out.ability = o.ability; out.stats = o.stats; out.ppLeft = o.ppLeft; out.original = null;
+  } else if (out.form && PERMANENT_FORMS.has(out.form)) {
+    const f = out.data.forms?.[out.form];
+    if (f) { out.ability = f.ability ?? out.ability; out.types = [...f.types]; out.stats = { ...f.stats, hp: out.stats.hp }; }
   } else {
     out.ability = out.mega && out.data.mega ? out.data.mega.ability : out.data.ability;
     out.types = out.tera && out.tera !== "stellar" ? [out.tera] : [...out.baseTypes];
     out.stats = { ...(out.mega && out.data.mega ? out.data.mega.stats : out.data.stats) };
   }
+  out.flags.booster = false;
   out.v = newVolatile();
   restoreItem(out);
   out.stages = zeroStages();
@@ -745,6 +969,8 @@ function doSwitch(s: BattleState, side: SideIndex, to: number, rng: Rng, log: st
   st.active = to;
   const inc = at(st.team, to);
   inc.turnsOut = 0;
+  inc.flags.justIn = true;
+
   inc.toxCount = inc.status === "tox" ? 1 : 0;
   log.push(`${SIDE_LABEL[side]} enviou ${monName(inc)}!`);
   if (s.field.magicRoom > 0) suppressItem(inc);
@@ -755,8 +981,13 @@ function doSwitch(s: BattleState, side: SideIndex, to: number, rng: Rng, log: st
     log.push(`${monName(inc)} foi curado pelo desejo!`);
   }
   applyHazards(s, side, inc, rng, log);
-  if (!inc.fainted) entryAbility(s, side, rng, log);
+    if (!inc.fainted) {
+    entryAbility(s, side, rng, log);
+    checkBooster(s, inc, log);
+    checkBerry(s, inc, activeMon(s, otherSide(side)), log, rng);
+  }
   syncGas(s);
+  for (const side of [0, 1] as const) checkBooster(s, activeMon(s, side), log);
   checkPermanentWeather(s, log);
 }
 
@@ -792,7 +1023,7 @@ function applyGmax(s: BattleState, side: SideIndex, me: Mon, foe: Mon, effect: s
     case "trapdmg": if (!foe.fainted && foe.v.trap === 0) { foe.v.trap = 4 + Math.floor(rng() * 2); log.push(`${monName(foe)} foi preso!`); } break;
     case "spe-2": if (!foe.fainted) changeStage(s, foe, "spe", -2, log, me); break;
     case "veil": s.sides[side].screens.auroraVeil = 5; log.push("Aurora Veil protege o time!"); break;
-    case "attract": if (!foe.fainted) { foe.v.infatuated = true; log.push(`${monName(foe)} se apaixonou!`); } break;
+    case "attract": if (!foe.fainted && genderRel(me, foe) === "opposite") { foe.v.infatuated = true; log.push(`${monName(foe)} se apaixonou!`); } break;
     case "berry": if (!me.item && me.v.berry && rng() < 0.5) { me.item = me.v.berry; log.push(`${monName(me)} recuperou a berry!`); } break;
     case "torment": if (!foe.fainted) { foe.v.torment = true; log.push(`${monName(foe)} foi atormentado!`); } break;
     case "wind": {
@@ -817,7 +1048,7 @@ function applyGmax(s: BattleState, side: SideIndex, me: Mon, foe: Mon, effect: s
 // ---------------------------------------------------------------
 // Mega, Tera, Dynamax e Z
 // ---------------------------------------------------------------
-function activateGimmick(s: BattleState, side: SideIndex, a: MoveAction, log: string[]): void {
+export function activateGimmick(s: BattleState, side: SideIndex, a: MoveAction, log: string[]): void {
   const me = activeMon(s, side);
   const st = s.sides[side];
   if (a.gimmick === "mega" && canMega(s, side) && me.data.mega) {
@@ -838,6 +1069,14 @@ function activateGimmick(s: BattleState, side: SideIndex, a: MoveAction, log: st
     me.tera = a.teraType;
     if (a.teraType !== "stellar") me.types = [a.teraType];
     log.push(`${monName(me)} terastalizou no tipo ${a.teraType === "stellar" ? "Estelar" : pretty(a.teraType)}!`);
+    if (me.data.species.startsWith("terapagos")) {
+      changeForm(me, "stellar", log);
+      s.field.weather = null; s.field.terrain = null;
+      log.push("O clima e o terreno foram apagados!");
+    }
+    const embody: Record<string, StageKey> = { "embody-aspect-teal": "spe", "embody-aspect-wellspring": "spd", "embody-aspect-hearthflame": "atk", "embody-aspect-cornerstone": "def" };
+    const emb = me.ability ? embody[me.ability] : undefined;
+    if (emb) changeStage(s, me, emb, 1, log, null);
   }
   if (a.gimmick === "dynamax" && canDynamax(s, side)) {
     const gmax = !!a.gmax && canGigantamax(s, side);
@@ -858,7 +1097,7 @@ function activateGimmick(s: BattleState, side: SideIndex, a: MoveAction, log: st
 const AIMS_FOE = ["selected-pokemon", "all-opponents", "random-opponent", "all-other-pokemon", "specific-move"];
 const FIELD_SPEC = (sp: MoveSpec) => !!(sp.weather || sp.terrain || sp.hazard || sp.screen || sp.haze || sp.gravity || sp.sport || sp.trickRoom || sp.tailwind || sp.safeguard || sp.mist || sp.luckyChant);
 
-function callMove(s: BattleState, side: SideIndex, called: BattleMoveData, rng: Rng, log: string[], depth: number): boolean {
+export function callMove(s: BattleState, side: SideIndex, called: BattleMoveData, rng: Rng, log: string[], depth: number): boolean {
   if (depth > 2) return false;
   const me = activeMon(s, side);
   const spec = specOf(called);
@@ -867,7 +1106,17 @@ function callMove(s: BattleState, side: SideIndex, called: BattleMoveData, rng: 
   return runAttack(s, side, me, called, spec, false, rng, log) > 0;
 }
 
-function runStatus(
+export function checkBooster(s: BattleState, m: Mon, log: string[]): void {
+  if (m.fainted || m.item !== "booster-energy" || m.flags.booster) return;
+  if (m.ability !== "protosynthesis" && m.ability !== "quark-drive") return;
+  if (itemsOff(s, m)) return;
+  const natural = m.ability === "protosynthesis" ? baseWx(s) === "sun" : s.field.terrain === "electric";
+  if (natural) return;                       // o Sol ou o terreno já ativa a habilidade
+  m.item = null; m.v.lastItem = "booster-energy"; m.flags.booster = true;
+  log.push(`${monName(m)} consumiu a Booster Energy e ficou turbinado!`);
+}
+
+export function runStatus(
   s: BattleState, side: SideIndex, me: Mon, move: BattleMoveData, spec: MoveSpec,
   z: boolean, rng: Rng, log: string[], depth = 0
 ): boolean {
@@ -887,14 +1136,22 @@ function runStatus(
   }
 
   if (aimsFoe) {
-    if (foe.ability === "good-as-gold" && !AB.ignoresAbility(me)) { log.push(`${monName(foe)} é imune a golpes de status!`); return false; }
-    if ((foe.ability === "magic-bounce" && !AB.ignoresAbility(me)) || foe.v.magicCoat) { log.push(`${monName(foe)} refletiu o golpe!`); return false; }
+    if (foe.ability === "good-as-gold" && !(AB.ignoresAbility(me) || me.ability === "mycelium-might")) { log.push(`${monName(foe)} é imune a golpes de status!`); return false; }
+    if (me.ability === "prankster" && foe.types.includes("dark") && !z) { log.push(`Não afeta ${monName(foe)}...`); return false; }
+    if ((foe.ability === "magic-bounce" && !(AB.ignoresAbility(me) || me.ability === "mycelium-might")) || foe.v.magicCoat) {
+      log.push(`${monName(foe)} refletiu o golpe!`);
+      return depth === 0 ? runStatus(s, foeSide, foe, move, spec, true, rng, log, depth + 1) : false;
+    }
     if (foe.v.protect) { log.push(`${monName(foe)} se protegeu!`); return false; }
-    if (foe.v.substitute > 0 && !spec.forceSwitch) return fail();
+        if (foe.v.substitute > 0 && !spec.forceSwitch && me.ability !== "infiltrator" && !SOUND.has(move.name)) return fail();
     if (AB.immuneToMove(foe, move)) { log.push(`Não afeta ${monName(foe)}...`); return false; }
     if (move.accuracy !== null && !z && !me.v.lockOn && !AB.alwaysHits(me, foe)) {
-      const acc = move.accuracy * AB.accuracyMult(me, foe, move, baseWx(s)) * accStageMult(me.stages.acc - foe.stages.eva);
+      const acc = move.accuracy * AB.accuracyMult(me, foe, move, baseWx(s)) * accStageMult(me.stages.acc - AB.evasionStage(me, foe));
       if (rng() * 100 >= acc) { log.push(`O golpe de ${monName(me)} errou!`); return false; }
+    }
+    if ((foe.ability === "aroma-veil" || foe.flags.vAromaVeil) && (spec.encore || spec.disable || spec.torment || spec.taunt || spec.healBlock || spec.attract) && !AB.ignoresAbility(me)) {
+      log.push(`${monName(foe)} está protegido pelo Aroma Veil!`);
+      return false;
     }
     me.v.lockOn = false;
   }
@@ -905,7 +1162,15 @@ function runStatus(
   if (spec.trickRoom) { s.field.trickRoom = s.field.trickRoom > 0 ? 0 : 5; log.push(s.field.trickRoom > 0 ? "A dimensão ficou distorcida!" : "A dimensão voltou ao normal."); return true; }
   if (spec.gravity) { if (s.field.gravity > 0) return fail(); s.field.gravity = 5; log.push("A gravidade aumentou!"); return true; }
   if (spec.sport) { if (spec.sport === "mud") s.field.mudSport = 5; else s.field.waterSport = 5; log.push("O campo foi coberto!"); return true; }
-  if (spec.tailwind) { const st = s.sides[side]; if (st.tailwind > 0) return fail(); st.tailwind = 4; log.push(`${SIDE_LABEL[side]} ganhou um vento favorável!`); return true; }
+  if (spec.tailwind) {
+    const st = s.sides[side];
+    if (st.tailwind > 0) return fail();
+    st.tailwind = 4;
+    log.push(`${SIDE_LABEL[side]} ganhou um vento favorável!`);
+    if (me.ability === "wind-power") me.v.charged = true;
+    if (me.ability === "wind-rider") changeStage(s, me, "atk", 1, log, null);
+    return true;
+  }
   if (spec.safeguard) { const st = s.sides[side]; if (st.safeguard > 0) return fail(); st.safeguard = 5; log.push("O time ficou protegido contra status!"); return true; }
   if (spec.mist) { const st = s.sides[side]; if (st.mist > 0) return fail(); st.mist = 5; log.push("Uma névoa protege o time!"); return true; }
   if (spec.luckyChant) { const st = s.sides[side]; if (st.luckyChant > 0) return fail(); st.luckyChant = 5; log.push("O time está protegido contra críticos!"); return true; }
@@ -918,7 +1183,9 @@ function runStatus(
     return true;
   }
   if (spec.hazard) {
-    const h = s.sides[foeSide].hazards;
+    const bounced = foe.ability === "magic-bounce" && !AB.ignoresAbility(me) && me.ability !== "mycelium-might";
+    if (bounced) log.push(`${monName(foe)} refletiu as armadilhas!`);
+    const h = s.sides[bounced ? side : foeSide].hazards;
     const key = spec.hazard;
     if (key === "stealthRock" || key === "stickyWeb") { if (h[key]) return fail(); h[key] = true; }
     else { if (h[key] >= (key === "spikes" ? 3 : 2)) return fail(); h[key]++; }
@@ -999,7 +1266,7 @@ function runStatus(
     return true;
   }
   if (spec.sleepTalk) {
-    if (me.status !== "slp") return fail();
+    if (!isAsleep(me)) return fail();
     const opts = me.data.moves.filter((m) => m.name !== "sleep-talk" && isSupported(m) && !isComplexSpec(specOf(m)));
     const pick = opts[Math.floor(rng() * opts.length)];
     return pick ? callMove(s, side, pick, rng, log, depth + 1) : fail();
@@ -1030,7 +1297,12 @@ function runStatus(
   if (spec.leechSeed) { if (foe.v.leechSeed || foe.types.includes("grass")) return fail(); foe.v.leechSeed = true; log.push(`${monName(foe)} foi semeado!`); return true; }
   if (spec.yawn) { if (foe.v.yawn > 0 || !canInflict(s, foe, "slp", true)) return fail(); foe.v.yawn = 2; log.push(`${monName(foe)} ficou com sono!`); return true; }
   if (spec.taunt) { if (foe.v.taunt > 0 || dyn || foe.ability === "oblivious") return fail(); foe.v.taunt = 3; log.push(`${monName(foe)} foi provocado!`); return true; }
-  if (spec.trick) { [me.item, foe.item] = [foe.item, me.item]; log.push(`${monName(me)} trocou de item com ${monName(foe)}!`); return true; }
+  if (spec.trick) {
+    if (foe.ability === "sticky-hold") return fail();
+    [me.item, foe.item] = [foe.item, me.item];
+    log.push(`${monName(me)} trocou de item com ${monName(foe)}!`);
+    return true;
+  }
   if (spec.encore) {
     const idx = foe.v.lastIndex;
     if (dyn || foe.v.encore || idx < 0) return fail();
@@ -1054,8 +1326,8 @@ function runStatus(
     log.push("Os dois Pokémon vão desmaiar em três turnos!");
     return true;
   }
-  if (spec.attract) { if (foe.v.infatuated || dyn || ["oblivious", "aroma-veil"].includes(foe.ability ?? "")) return fail(); foe.v.infatuated = true; log.push(`${monName(foe)} se apaixonou!`); return true; }
-  if (spec.nightmare) { if (foe.status !== "slp" || foe.v.nightmare) return fail(); foe.v.nightmare = true; log.push(`${monName(foe)} começou a ter pesadelos!`); return true; }
+  if (spec.attract) { if (foe.v.infatuated || dyn || genderRel(me, foe) !== "opposite" || ["oblivious", "aroma-veil"].includes(foe.ability ?? "")) return fail(); foe.v.infatuated = true; log.push(`${monName(foe)} se apaixonou!`); return true; }
+  if (spec.nightmare) { if (!isAsleep(foe) || foe.v.nightmare) return fail(); foe.v.nightmare = true; log.push(`${monName(foe)} começou a ter pesadelos!`); return true; }
   if (spec.trapFoe) { if (foe.v.noSwitch) return fail(); foe.v.noSwitch = true; log.push(`${monName(foe)} não pode mais fugir!`); return true; }
   if (spec.spite) { const i = foe.v.lastIndex; if (i < 0) return fail(); foe.ppLeft[i] = Math.max(0, (foe.ppLeft[i] ?? 0) - 4); log.push("O PP do último golpe foi reduzido!"); return true; }
   if (spec.identify) { foe.v.identified = true; log.push(`${monName(foe)} foi identificado!`); return true; }
@@ -1115,7 +1387,7 @@ function runStatus(
       if (me.hp <= cost) return fail();
       hurt(me, cost);
     }
-    if (spec.eatOwnBerry) eatBerry(me, log);
+    if (spec.eatOwnBerry) eatBerry(s, me, log, rng);
     for (const [k, n] of spec.selfStats ?? []) changeStage(s, me, k, n, log, null);
     if (spec.cureOnUse) me.status = null;
     if (spec.noRetreat) me.v.noSwitch = true;
@@ -1281,12 +1553,19 @@ const HITS_SEMI: Record<string, string[]> = {
   dive: ["surf", "whirlpool"],
 };
 
-function survive(foe: Mon, dmg: number, log: string[]): number {
+function survive(foe: Mon, dmg: number, log: string[], ignore = false): number {
   if (dmg < foe.hp) return dmg;
   if (foe.v.endure) { log.push(`${monName(foe)} aguentou o golpe!`); return foe.hp - 1; }
   if (foe.hp === foe.maxHp) {
-    if (foe.item === "focus-sash") { foe.item = null; log.push(`${monName(foe)} aguentou o golpe com a Focus Sash!`); return foe.hp - 1; }
-    if (foe.ability === "sturdy") { log.push(`${monName(foe)} aguentou o golpe com Sturdy!`); return foe.hp - 1; }
+    if (foe.item === "focus-sash") {
+      foe.item = null; foe.v.lastItem = "focus-sash";
+      log.push(`${monName(foe)} aguentou o golpe com a Focus Sash!`);
+      return foe.hp - 1;
+    }
+    if (foe.ability === "sturdy" && !ignore) {
+      log.push(`${monName(foe)} aguentou o golpe com Sturdy!`);
+      return foe.hp - 1;
+    }
   }
   return dmg;
 }
@@ -1302,6 +1581,7 @@ function afterHit(
   const foeSide = otherSide(side);
   if (!foe.fainted) {
     switch (foe.ability) {
+      case "thermal-exchange": if (type === "fire") changeStage(s, foe, "atk", 1, log, null); break;
       case "weak-armor": if (physical) { changeStage(s, foe, "def", -1, log, null); changeStage(s, foe, "spe", 2, log, null); } break;
       case "stamina": changeStage(s, foe, "def", 1, log, null); break;
       case "justified": if (type === "dark") changeStage(s, foe, "atk", 1, log, null); break;
@@ -1311,13 +1591,22 @@ function afterHit(
       case "anger-point": if (crit) foe.stages.atk = 6; break;
       case "color-change": if (!foe.tera) foe.types = [type]; break;
       case "electromorphosis": foe.v.charged = true; break;
+      case "wind-power": if (WIND.has(move.name)) foe.v.charged = true; break;
+      case "gulp-missile":
+        if (foe.flags.gulping || foe.flags.gorging) {
+          hazardHurt(s, side, me, me.maxHp / 4, "foi atingido pela presa cuspida!", log);
+          if (foe.flags.gulping) changeStage(s, me, "def", -1, log, foe);
+          else if (canInflict(s, me, "par")) inflict(s, me, "par", rng, log);
+          foe.flags.gulping = false; foe.flags.gorging = false;
+        }
+        break;
       case "sand-spit": setWeather(s, "sand", foe, log); break;
       case "seed-sower": setTerrain(s, "grassy", foe, log); break;
       case "cotton-down": changeStage(s, me, "spe", -1, log, foe); break;
       case "gooey": case "tangling-hair": if (contact) changeStage(s, me, "spe", -1, log, foe); break;
       case "mummy": case "lingering-aroma": if (contact && me.ability !== foe.ability) { me.ability = foe.ability; log.push(`${monName(me)} ficou com a habilidade ${pretty(foe.ability ?? "")}!`); } break;
       case "wandering-spirit": if (contact) { [me.ability, foe.ability] = [foe.ability, me.ability]; log.push("As habilidades foram trocadas!"); } break;
-      case "cute-charm": if (contact && rng() < 0.3 && !me.v.infatuated) { me.v.infatuated = true; log.push(`${monName(me)} se apaixonou!`); } break;
+      case "cute-charm": if (contact && rng() < 0.3 && !me.v.infatuated && me.ability !== "oblivious" && genderRel(me, foe) === "opposite") { me.v.infatuated = true; log.push(`${monName(me)} se apaixonou!`); } break;
       case "perish-body": if (contact && me.v.perish === 0 && foe.v.perish === 0) { me.v.perish = 4; foe.v.perish = 4; log.push("Os dois Pokémon vão desmaiar em três turnos!"); } break;
       case "toxic-debris": if (physical && s.sides[side].hazards.toxicSpikes < 2) { s.sides[side].hazards.toxicSpikes++; log.push("Toxic Spikes foram espalhados!"); } break;
       case "pickpocket": if (contact && foe.item === null && me.item && me.ability !== "sticky-hold") { foe.item = me.item; me.item = null; log.push(`${monName(foe)} roubou o item de ${monName(me)}!`); } break;
@@ -1332,9 +1621,9 @@ function afterHit(
       case "spicy-spray": if (canInflict(s, me, "brn", false, me)) inflict(s, me, "brn", rng, log, me); break;
       default: break;
     }
-  } else if (contact) {
-    if (foe.ability === "aftermath") hazardHurt(s, side, me, me.maxHp / 4, "foi ferido pela explosão!", log);
-    if (foe.ability === "innards-out") hazardHurt(s, side, me, total, "foi ferido por dentro!", log);
+  } else {
+    if (contact && foe.ability === "aftermath") hazardHurt(s, side, me, me.maxHp / 4, "foi ferido pela explosão!", log);
+    if (foe.ability === "innards-out") hazardHurt(s, side, me, hpBefore, "foi ferido por dentro!", log);
   }
   // reações do atacante
   if (!me.fainted && !foe.fainted && !AB.shieldDust(foe)) {
@@ -1345,7 +1634,7 @@ function afterHit(
   if (me.ability === "magician" && !me.item && foe.item && !me.fainted && foe.ability !== "sticky-hold") { me.item = foe.item; foe.item = null; log.push(`${monName(me)} pegou o item de ${monName(foe)}!`); }
 }
 
-function runAttack(
+export function runAttack(
   s: BattleState, side: SideIndex, me: Mon, move: BattleMoveData, spec: MoveSpec,
   z: boolean, rng: Rng, log: string[]
 ): number {
@@ -1361,8 +1650,8 @@ function runAttack(
   if (raw === "harsh-sun" && type === "water") { log.push("O golpe de água evaporou com o sol extremo!"); return 0; }
   if (raw === "heavy-rain" && type === "fire") { log.push("O golpe de fogo foi apagado pela chuva torrencial!"); return 0; }
   if (spec.fling && !me.item) { log.push("Mas falhou!"); return 0; }
-  if (spec.dreamEater && foe.status !== "slp") { log.push("Mas falhou!"); return 0; }
-  if (spec.needSleep && me.status !== "slp") { log.push("Mas falhou!"); return 0; }
+  if (spec.dreamEater && !isAsleep(foe)) { log.push("Mas falhou!"); return 0; }
+  if (spec.needSleep && !isAsleep(me)) { log.push("Mas falhou!"); return 0; }
   if (spec.needBerry && !me.flags.ateBerry) { log.push("Mas falhou!"); return 0; }
   if (spec.naturalGift && !(me.item && NATURAL_GIFT[me.item])) { log.push("Mas falhou!"); return 0; }
   if (spec.power === "spitUp" && me.v.stockpile <= 0) { log.push("Mas falhou!"); return 0; }
@@ -1384,6 +1673,11 @@ function runAttack(
   if (!ignore && AB.immuneToMove(foe, move)) { log.push(`${monName(foe)} é imune ao golpe!`); return 0; }
   if (!ignore && AB.blocksPriority(foe) && move.priority + AB.priorityBonus(me, move) > 0) { log.push(`${monName(foe)} bloqueou o golpe prioritário!`); return 0; }
 
+  if (!ignore && foe.ability === "wind-rider" && WIND.has(move.name)) {
+    log.push(`${monName(foe)} cavalgou o vento!`);
+    changeStage(s, foe, "atk", 1, log, null);
+    return 0;
+  }
   const absorbed = ignore ? null : AB.absorbEffect(foe.ability, type);
   if (absorbed) {
     if (absorbed.heal) heal(foe, foe.maxHp * absorbed.heal);
@@ -1394,9 +1688,9 @@ function runAttack(
   }
 
   if ((!z && move.accuracy !== null) || spec.ohko) {
-    let acc = (move.accuracy ?? 100) * AB.accuracyMult(me, foe, move, w) * accStageMult(me.stages.acc - foe.stages.eva);
+    let acc = (move.accuracy ?? 100) * AB.accuracyMult(me, foe, move, w) * accStageMult(me.stages.acc - AB.evasionStage(me, foe));
     if (spec.ohko) {
-      if (me.data.level < foe.data.level || foe.v.dynamax > 0) { log.push("Mas falhou!"); return 0; }
+            if (me.data.level < foe.data.level || foe.v.dynamax > 0 || (foe.ability === "sturdy" && !ignore)) { log.push("Mas falhou!"); return 0; }
       acc = 30 + me.data.level - foe.data.level;
     }
     if (["thunder", "hurricane"].includes(move.name)) { if (w === "rain") acc = 100; else if (w === "sun") acc = 50; }
@@ -1458,13 +1752,13 @@ function runAttack(
       if (pbond && h === 1) dmg = Math.max(1, Math.floor(dmg * 0.25));
     }
     if (pierce && foe.v.protect) dmg = Math.max(1, Math.floor(dmg / 4));
-    if (foe.v.substitute > 0) {
+        if (foe.v.substitute > 0 && me.ability !== "infiltrator" && !SOUND.has(move.name)) {
       foe.v.substitute -= Math.min(foe.v.substitute, dmg);
       log.push(foe.v.substitute <= 0 ? `O substituto de ${monName(foe)} desapareceu!` : `O substituto de ${monName(foe)} absorveu o golpe!`);
       hitSub = true;
       continue;
     }
-    dmg = survive(foe, dmg, log);
+    dmg = survive(foe, dmg, log, ignore);
     total += hurt(foe, dmg).dealt;
     landed++;
     crited = crited || crit;
@@ -1479,12 +1773,14 @@ function runAttack(
 
   if (move.damage_class === "physical") foe.v.hitPhysical += total; else foe.v.hitSpecial += total;
   foe.v.hitsTaken += landed;
+    if (foe.flags.illusion) { foe.flags.illusion = false; log.push(`A ilusão de ${monName(foe)} foi desfeita!`); }
   if (me.v.charged && type === "electric") me.v.charged = false;
   if (me.tera === "stellar" && !me.stellarUsed.includes(type)) me.stellarUsed.push(type);
 
   if (foe.fainted) {
     announceFaint(s, foeSide, foe, log);
     const boost = AB.onKoBoost(me);
+    if (me.ability === "battle-bond" && !me.fainted) changeForm(me, "ash", log);
     if (boost && !me.fainted) changeStage(s, me, boost[0], boost[1], log, null);
     if (foe.v.destinyBond && !me.fainted) { hurt(me, me.hp); announceFaint(s, side, me, log);
     if (foe.v.grudge && me.v.lastIndex >= 0) me.ppLeft[me.v.lastIndex] = 0;
@@ -1520,6 +1816,7 @@ function runAttack(
   if (spec.breakScreens && total > 0) s.sides[foeSide].screens = { reflect: 0, lightScreen: 0, auroraVeil: 0 };
   if (spec.clearTerrain && total > 0) s.field.terrain = null;
   if (!ignore) afterHit(s, side, me, foe, move, type, total, hpBefore, crited, rng, log);
+  hitBerry(s, side, me, foe, move, type, eff, total, rng, log);
 
   if (eff > 1 && foe.item === "weakness-policy" && !foe.fainted) { foe.item = null; changeStage(s, foe, "atk", 2, log, null); changeStage(s, foe, "spa", 2, log, null); }
 
@@ -1553,7 +1850,7 @@ function runAttack(
   if (spec.steal && !me.item && foe.item && !foe.fainted && foe.ability !== "sticky-hold") { me.item = foe.item; foe.item = null; log.push(`${monName(me)} roubou o item de ${monName(foe)}!`); }
   if (spec.eatBerry && foe.item?.endsWith("-berry")) {
     const b = foe.item; foe.item = null;
-    if (move.name !== "incinerate") { me.item = b; eatBerry(me, log); } else log.push(`${monName(foe)} teve a berry queimada!`);
+    if (move.name !== "incinerate") { me.item = b; eatBerry(s, me, log, rng); } else log.push(`${monName(foe)} teve a berry queimada!`);
   }
   if (spec.fling) { log.push(`${monName(me)} arremessou ${pretty(me.item ?? "")}!`); me.item = null; }
   if (spec.naturalGift && me.item) { me.v.lastItem = me.item; me.item = null; }
@@ -1606,19 +1903,23 @@ function confusionHit(s: BattleState, side: SideIndex, me: Mon, rng: Rng, log: s
   if (r.fainted) announceFaint(s, side, me, log);
 }
 
-function chosenMove(s: BattleState, side: SideIndex, a: MoveAction): BattleMoveData {
+export function chosenMove(s: BattleState, side: SideIndex, a: MoveAction): BattleMoveData {
   const me = activeMon(s, side);
   const idx = me.v.charging ?? me.v.rampage?.index ?? (me.v.encore?.index ?? a.index);
   return effMove(me, idx < 0 ? STRUGGLE : at(me.data.moves, idx));
 }
-function movePriority(s: BattleState, side: SideIndex, a: MoveAction): number {
+export function movePriority(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng): number {
   const me = activeMon(s, side);
   if (me.v.recharge) return 0;
   const mv = chosenMove(s, side, a);
-  return mv.priority + AB.priorityBonus(me, mv);
+  let p = mv.priority + AB.priorityBonus(me, mv);
+  if (me.flags.custap) p += 0.1;
+  if (me.ability === "stall" || (me.ability === "mycelium-might" && mv.damage_class === "status")) p -= 0.5;
+  else if (me.ability === "quick-draw" && rng() < 0.3) p += 0.5;
+  return p;
 }
 
-function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, log: string[]): void {
+export function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, log: string[]): void {
   const me = activeMon(s, side);
   const foeSide = otherSide(side);
   s.moved[side] = true;
@@ -1663,7 +1964,7 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
   if (!spec.protect) me.v.protectCount = 0;
   if (!forced && index >= 0) {
     me.ppLeft[index] = (me.ppLeft[index] ?? 1) - (activeMon(s, foeSide).ability === "pressure" ? 2 : 1);
-    if (isChoice(me.item) && me.v.dynamax <= 0) me.v.lockedMove = index;
+        if ((isChoice(me.item) || me.ability === "gorilla-tactics") && me.v.dynamax <= 0) me.v.lockedMove = index;
     me.v.lastIndex = index;
   }
   if (useZ) { s.sides[side].gimmicks.z = true; me.flags.zUsed = true; log.push(`${monName(me)} liberou todo o seu poder Z!`); }
@@ -1676,6 +1977,11 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
   if (me.v.powdered && type === "fire") { hazardHurt(s, side, me, me.maxHp / 4, "explodiu com o pó!", log); return; }
 
   log.push(`${monName(me)} usou ${pretty(move.name)}!`);
+  s.dblUsed = true;
+  if (me.ability === "stance-change") {
+    if (isDamaging(move) && me.form !== "blade") changeForm(me, "blade", log);
+    else if (spec.protect === "kings" && me.form === "blade") revertForm(me, log);
+  }
   const repeated = !!spec.noRepeat && me.v.lastMove === base.name;
   me.v.lastMove = base.name;
   s.lastMoveUsed = base.name;
@@ -1727,6 +2033,11 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
     ok = total > 0 || spec.fixed !== undefined || !!spec.ohko;
   } else ok = runStatus(s, side, me, move, spec, useZ, rng, log);
 
+  if (me.ability === "gulp-missile" && (base.name === "surf" || base.name === "dive") && !me.fainted && !me.flags.gulping && !me.flags.gorging) {
+    if (me.hp * 2 > me.maxHp) me.flags.gulping = true; else me.flags.gorging = true;
+    log.push(`${monName(me)} engoliu uma presa!`);
+  }
+
   if (spec.futureSight) {
     const foe = activeMon(s, foeSide);
     const r = calcDamageBetween(s, me, side, foe, foeSide, move);
@@ -1738,7 +2049,7 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
     me.v.rampage.turns--;
     if (me.v.rampage.turns <= 0 || !ok) { me.v.rampage = null; if (!me.fainted) confuse(s, me, rng, log); }
   }
-  if (spec.selfKo && !me.fainted) {
+  if (spec.selfKo && !me.fainted && !s.deferKo) {
     if (spec.healingWish) s.sides[side].healingWish = true;
     hurt(me, me.hp);
     announceFaint(s, side, me, log);
@@ -1746,6 +2057,10 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
   if (spec.baton) s.baton = { ...me.stages };
   if (move.name === "glaive-rush") me.v.glaive = true;
   if (spec.pivot && ok && !me.fainted && s.winner === null && benchCount(s, side) > 0 && canSwitch(s, side)) s.pivot = side;
+  if (DANCE.has(base.name)) {
+    const dancer = activeMon(s, foeSide);
+    if (dancer.ability === "dancer" && !dancer.fainted && s.winner === null) callMove(s, foeSide, base, rng, log, 1);
+  }
 }
 
 // ---------------------------------------------------------------
@@ -1754,7 +2069,7 @@ function executeMove(s: BattleState, side: SideIndex, a: MoveAction, rng: Rng, l
 const sandImmune = (m: Mon) => defTypes(m).some((t) => ["rock", "ground", "steel"].includes(t)) || ["sand-veil", "sand-rush", "sand-force", "magic-guard", "overcoat"].includes(m.ability ?? "");
 const hailImmune = (m: Mon) => defTypes(m).includes("ice") || ["ice-body", "snow-cloak", "magic-guard", "overcoat", "slush-rush"].includes(m.ability ?? "");
 
-function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
+export function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
   const w = baseWx(s);
   const order = ([0, 1] as const).slice().sort((a, b) => effSpeedOf(s, activeMon(s, b), b) - effSpeedOf(s, activeMon(s, a), a));
 
@@ -1787,7 +2102,7 @@ function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
       if (!foe.fainted) heal(foe, r.dealt);
       if (r.fainted) announceFaint(s, side, m, log);
     }
-    if (m.status === "brn") dmg(1 / 16, "sofreu com a queimadura!");
+    if (m.status === "brn") dmg(m.ability === "heatproof" ? 1 / 32 : 1 / 16, "sofreu com a queimadura!");
     else if (m.status === "psn") { if (m.ability === "poison-heal") mend(1 / 8, "recuperou HP com o veneno."); else dmg(1 / 8, "sofreu com o veneno!"); }
     else if (m.status === "tox") {
       if (m.ability === "poison-heal") mend(1 / 8, "recuperou HP com o veneno.");
@@ -1807,7 +2122,7 @@ function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
     }
 
     if (!m.fainted) {
-      if (m.ability === "speed-boost" && m.turnsOut > 0) changeStage(s, m, "spe", 1, log, null);
+      if (m.ability === "speed-boost" && !m.flags.justIn) changeStage(s, m, "spe", 1, log, null);
       if (m.ability === "moody") {
         const up = at(STAGE_KEYS, Math.floor(rng() * STAGE_KEYS.length));
         changeStage(s, m, up, 2, log, null);
@@ -1824,9 +2139,9 @@ function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
       if (m.v.levitate > 0) m.v.levitate--;
       if (m.v.encore && --m.v.encore.turns <= 0) m.v.encore = null;
       if (m.v.disable && --m.v.disable.turns <= 0) m.v.disable = null;
-      if (foe.ability !== "unnerve") {
-        if (m.item === "sitrus-berry" && m.hp <= m.maxHp / 2) eatBerry(m, log);
-        if (m.item === "lum-berry" && m.status) eatBerry(m, log);
+            if (!["unnerve", "as-one-glastrier", "as-one-spectrier"].includes(foe.ability ?? "")) {
+        if (m.item === "sitrus-berry" && m.hp <= m.maxHp / 2) eatBerry(s, m, log, rng);
+        if (m.item === "lum-berry" && m.status) eatBerry(s, m, log, rng);
       }
       if (m.v.dynamax > 0 && --m.v.dynamax === 0) endDynamax(m, log);
     }
@@ -1840,11 +2155,25 @@ function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
     if (m.v.embargo > 0 && --m.v.embargo === 0 && s.field.magicRoom === 0) restoreItem(m);
     if (m.flags.iceface && (w === "snow" || w === "hail")) { m.flags.iceface = false; log.push(`${monName(m)} recuperou a cobertura de gelo!`); }
     if (m.v.saltCure && !m.fainted) dmg(defTypes(m).some((t) => t === "water" || t === "steel") ? 1 / 4 : 1 / 8, "sofreu com o sal!");
+    if (m.v.cud && !m.fainted && --m.v.cud.turns <= 0) {
+      const b = m.v.cud.berry;
+      m.v.cud = null;
+      berryEffect(s, m, b, log, rng);
+      log.push(`${monName(m)} mastigou a berry de novo!`);
+    }
+    if (m.ability === "pickup" && !m.item && foe.v.lastItem && !foe.fainted) {
+      m.item = foe.v.lastItem; foe.v.lastItem = null;
+      log.push(`${monName(m)} pegou ${pretty(m.item)}!`);
+    }
+    if (m.ability === "hunger-switch" && m.data.species.startsWith("morpeko") && !m.fainted) {
+      m.flags.hangry = !m.flags.hangry;
+      log.push(`${monName(m)} ficou ${m.flags.hangry ? "faminto" : "saciado"}!`);
+    }
     m.v.flinch = false;
     m.v.roosted= false;
     m.turnsOut++;
   }
-
+   if (s.skipField) return;
   for (const side of [0, 1] as const) {
     const st = s.sides[side];
     const m = activeMon(s, side);
@@ -1882,6 +2211,7 @@ function endOfTurn(s: BattleState, rng: Rng, log: string[]): void {
     log.push("Os itens voltaram a funcionar.");
   }
   checkPermanentWeather(s, log);
+  syncForms(s, log);
 }
 
 function finishTurn(s: BattleState): void {
@@ -1898,6 +2228,7 @@ function advance(s: BattleState, rng: Rng, log: string[]): void {
     const a = ctx.actions[side];
     if (a.kind !== "move" || activeMon(s, side).fainted) continue;
     executeMove(s, side, a, rng, log);
+    syncForms(s, log);
   }
   if (s.pivot !== null) return;
   if (s.winner === null) endOfTurn(s, rng, log);
@@ -1913,7 +2244,8 @@ export function playTurn(prev: BattleState, actions: [Action, Action], rng: Rng)
   s.lastWasSwitch = [false, false];
   for (const side of [0, 1] as const) {
     const m = activeMon(s, side);
-    m.v.protect = null; m.v.endure = false; m.v.hitPhysical = 0; m.v.hitSpecial = 0;
+    m.flags.custap = false; if (m.flags.micle) { if (m.flags.micleOld) { m.flags.micle = false; m.flags.micleOld = false; } else m.flags.micleOld = true; }
+    m.v.protect = null; m.flags.justIn = false; m.v.endure = false; m.v.hitPhysical = 0; m.v.hitSpecial = 0;
     m.v.magicCoat = false; m.v.electrified = false; m.v.powdered = false; m.v.snatch = false;
   }
   log.push(`— Turno ${s.turn} —`);
@@ -1927,7 +2259,13 @@ export function playTurn(prev: BattleState, actions: [Action, Action], rng: Rng)
     if (a.kind === "switch") { doSwitch(s, side, a.to, rng, log); s.lastWasSwitch[side] = true; }
   }
 
-  const priority = (side: SideIndex) => { const a = actions[side]; return a.kind === "move" ? movePriority(s, side, a) : 0; };
+  startOfTurnBerries(s, log, rng);
+  const a0 = actions[0], a1 = actions[1];
+  const pri: [number, number] = [
+    a0.kind === "move" ? movePriority(s, 0, a0, rng) : 0,
+    a1.kind === "move" ? movePriority(s, 1, a1, rng) : 0,
+  ];
+  const priority = (side: SideIndex) => pri[side];
   const movers = ([0, 1] as const).filter((side) => actions[side].kind === "move");
   movers.sort((x, y) => {
     const dp = priority(y) - priority(x);

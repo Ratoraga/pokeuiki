@@ -106,6 +106,7 @@ async function openDetail(id: number) {
       <button id="prev" ${prev ? "" : "disabled"}>‹ Anterior</button><button id="next" ${next ? "" : "disabled"}>Próximo ›</button></div>
     <div class="card member-head">${img(d.id, 120)}<div><h2>${esc(prettyName(d.name))} <span class="muted">#${d.id}</span></h2>
       <div class="types">${typeBadge(d.type1)}${d.type2 ? typeBadge(d.type2) : ""}</div>
+              <p class="small"><strong>Gênero:</strong> ${genderHtml(d.gender_rate)}</p>
       <p class="muted small">${d.height !== null ? `${d.height / 10} m` : "—"} · ${d.weight !== null ? `${d.weight / 10} kg` : "—"}</p></div></div>
     <div class="card"><h3>Status base (total ${total})</h3>${STAT_KEYS.map((k) => `<div class="stat-row"><span class="stat-name">${STAT_LABELS[k]}</span>
       <strong class="stat-val">${d.base[k]}</strong><div class="stat-bar"><div style="width:${Math.min(100, (d.base[k] / 255) * 100)}%"></div></div></div>`).join("")}</div>
@@ -152,6 +153,13 @@ async function openDetail(id: number) {
   });
   drawMoves();
 }
+  function genderHtml(rate: number | null): string {
+    if (rate === null) return `<span class="muted">sem dados (rode bun run db:import)</span>`;
+    if (rate === -1) return "Sem gênero";
+    const f = (rate / 8) * 100, m = 100 - f;
+    const pct = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(1).replace(".", ",")}%`;
+    return `${m > 0 ? `<span class="g-m">♂ ${pct(m)}</span>` : ""} ${f > 0 ? `<span class="g-f">♀ ${pct(f)}</span>` : ""}`;
+  }
 
 async function main() {
   await boot("/pokedex");

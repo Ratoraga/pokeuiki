@@ -1,4 +1,5 @@
 import type { StatBlock } from "../stats";
+import type { Gender } from "../gender";
 
 export type Rng = () => number;
 export type SideIndex = 0 | 1; // 0 = jogador, 1 = bot
@@ -13,7 +14,7 @@ export interface BattleMoveData {
   id: number;
   name: string;
   type: string;
-  damage_class: string; // physical | special | status
+  damage_class: string;
   power: number | null;
   accuracy: number | null;
   pp: number;
@@ -61,6 +62,9 @@ export interface BattleMonData {
   mega: BattleMegaData | null;
   sprite: string | null;
   gmax: BattleGmaxData | null;
+  forms: Record<string, BattleMegaData> | null;
+  gender?: Gender;
+  nature?: string | null;
 }
 
 export interface BattleTeamData {
@@ -76,6 +80,7 @@ export interface ChartRow {
 }
 
 export interface Volatile {
+  cud: {berry: string; turns: number} | null;
   confusion: number;
   leechSeed: boolean;
   substitute: number;
@@ -149,6 +154,7 @@ export interface OriginalForm {
 }
 
 export interface Mon {
+  form: string | null;
   data: BattleMonData;
   species: string;
   types: string[];
@@ -172,6 +178,7 @@ export interface Mon {
   flags: Record<string, boolean>;
   original: OriginalForm | null; 
   v: Volatile;
+  gender: Gender;
 }
 
 export interface Hazards {
@@ -194,6 +201,7 @@ export interface SideState {
   futureSight: { turns: number; damage: number } | null;
   healingWish: boolean;
   gimmicks: Record<Gimmick, boolean>;
+  slots?: [number, number];
 }
 
 export interface FieldState {
@@ -209,6 +217,8 @@ export interface FieldState {
   wonderRoom: number;
   ionDeluge: boolean;
   fairyLock: number;
+  auras?: { fairy: boolean; dark: boolean; break: boolean };
+  ruin?: { tablets: boolean; vessel: boolean; sword: boolean; beads: boolean };
 }
 
 export type Action =
@@ -229,4 +239,14 @@ export interface BattleState {
   winner: SideIndex | null;
   ctx: { actions: [Action, Action]; queue: SideIndex[] } | null;
   passSub: number;
+  doubles?: boolean;
+  skipField?: boolean;                
+  mods?: { power: number; final: number };
+  dblUsed?: boolean;
+  deferKo?: boolean;                  
+  dside?: { wide: [boolean, boolean]; quick: [boolean, boolean] };
+  dpend?: boolean[];
+  weatherOff?: boolean;
+  dturn?: { acts: (import("./doubles").DAction | null)[]; queue: { side: 0 | 1; slot: 0 | 1 }[]; acted: number[] };
+  dpivot?: { side: 0 | 1; slot: 0 | 1 } | null;
 }

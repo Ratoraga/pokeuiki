@@ -6,6 +6,30 @@ type PowerRule =
   | "triple" | "firstMover" | "magnitude" | "fling" | "payback" | "revenge" | "assurance" | "smelling" 
   | "wakeup"| "spitUp" | "trumpCard" | "naturalGift" | "hardPress" | "lastRespects" | "rageFist";
 
+
+  type S5 = "atk" | "def" | "spa" | "spd" | "spe";
+
+export const BERRY_HEAL: Record<string, { hp?: number; frac?: number }> = {
+  "oran-berry": { hp: 10 }, "sitrus-berry": { frac: 0.25 }, "berry-juice": { hp: 20 },
+};
+export const PICKY_BERRY: Record<string, S5> = {   // curam 1/3; confundem se a natureza reduz esse atributo
+  "figy-berry": "atk", "wiki-berry": "spa", "mago-berry": "spe", "aguav-berry": "spd", "iapapa-berry": "def",
+};
+export const CURE_BERRY: Record<string, string[]> = {
+  "cheri-berry": ["par"], "chesto-berry": ["slp"], "pecha-berry": ["psn", "tox"], "rawst-berry": ["brn"],
+  "aspear-berry": ["frz"], "persim-berry": [], "lum-berry": ["par", "slp", "psn", "tox", "brn", "frz"],
+};
+export const PINCH_STAT_BERRY: Record<string, S5> = {
+  "liechi-berry": "atk", "ganlon-berry": "def", "salac-berry": "spe", "petaya-berry": "spa", "apicot-berry": "spd",
+};
+export const RESIST_BERRY: Record<string, string> = {
+  "occa-berry": "fire", "passho-berry": "water", "wacan-berry": "electric", "rindo-berry": "grass",
+  "yache-berry": "ice", "chople-berry": "fighting", "kebia-berry": "poison", "shuca-berry": "ground",
+  "coba-berry": "flying", "payapa-berry": "psychic", "tanga-berry": "bug", "charti-berry": "rock",
+  "kasib-berry": "ghost", "haban-berry": "dragon", "colbur-berry": "dark", "babiri-berry": "steel",
+  "roseli-berry": "fairy", "chilan-berry": "normal",
+};
+
 /** Regras especiais de golpes que não dá para ler só dos dados genéricos. */
 export interface MoveSpec {
   noop?: boolean;
@@ -459,3 +483,21 @@ export function applyMoveFix(m: BattleMoveData): BattleMoveData {
   const fix = MOVE_FIXES[m.name];
   return fix ? { ...m, ...fix } : m;
 }
+export const DANCE = new Set(["dragon-dance", "swords-dance",
+  "quiver-dance", "feather-dance", "fiery-dance", "petal-dance",
+  "teeter-dance", "lunar-dance", "revelation-dance", "victory-dance", "aqua-step"]);
+export const WIND = new Set(["air-cutter", "bleakwind-storm", "blizzard",
+  "fairy-wind", "gust", "heat-wave", "hurricane", "icy-wind", "petal-blizzard",
+  "sandsear-storm", "springtide-storm", "twister", "wildbolt-storm"]);
+export const PLATE_TYPES: Record<string, string> = {
+  "flame-plate": "fire", "splash-plate": "water", "zap-plate": "electric",
+  "meadow-plate": "grass", "icicle-plate": "ice", "fist-plate": "fighting",
+  "toxic-plate": "poison", "earth-plate": "ground", "sky-plate": "flying",
+  "mind-plate": "psychic", "insect-plate": "bug", "stone-plate": "rock",
+  "spooky-plate": "ghost", "draco-plate": "dragon", "dread-plate": "dark",
+  "iron-plate": "steel", "pixie-plate": "fairy",
+};
+export const MEMORY_ITEMS = ["fire", "water", "electric", "grass", "ice",
+  "fighting", "poison", "ground", "flying", "psychic", "bug", "rock", "ghost",
+  "dragon", "dark", "steel", "fairy"].map((t) => `${t}-memory`);
+BATTLE_ITEMS.push(...Object.keys(PLATE_TYPES), ...MEMORY_ITEMS);

@@ -9,11 +9,12 @@ export async function listPokemon(): Promise<PokemonSummary[]> {
 
 export async function getPokemonDetail(id: number): Promise<PokemonDetail | null> {
   const [p] = (await sql`
-    SELECT id, name, type1, type2, species_id, can_evolve, height, weight,
+      SELECT id, name, type1, type2, species_id, can_evolve, height, weight, gender_rate,
            base_hp, base_atk, base_def, base_spa, base_spd, base_spe
     FROM pokemon WHERE id = ${id}`) as (PokemonSummary & {
     species_id: number | null;
     can_evolve: boolean;
+    gender_rate: number | null;
     height: number | null;
     weight: number | null;
     base_hp: number; base_atk: number; base_def: number;
@@ -44,6 +45,7 @@ export async function getPokemonDetail(id: number): Promise<PokemonDetail | null
     can_evolve: p.can_evolve,
     height: p.height,
     weight: p.weight,
+    gender_rate: p.gender_rate ?? null,
     base: { hp: p.base_hp, atk: p.base_atk, def: p.base_def, spa: p.base_spa, spd: p.base_spd, spe: p.base_spe },
     abilities,
     moves,

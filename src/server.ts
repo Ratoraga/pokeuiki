@@ -4,6 +4,7 @@ import explorarPage from "./frontend/explorar.html";
 import timePage from "./frontend/time.html";
 import batalhaPage from "./frontend/batalha.html";
 import pokedexPage from "./frontend/pokedex.html";
+import calculadoraPage from "./frontend/calculadora.html";
 import { config } from "./config";
 import { error } from "./http";
 import { login, register } from "./routes/auth";
@@ -20,7 +21,7 @@ import {
   removeMember,
   updateMember,
 } from "./routes/teams";
-import { listUserTeams } from "./routes/users";
+  import { addMyContact, listMyContacts, listUserTeams, removeMyContact } from "./routes/users";
 
 const server = Bun.serve({
   port: config.port,
@@ -32,6 +33,7 @@ const server = Bun.serve({
     "/time": timePage,
     "/batalha": batalhaPage,
     "/pokedex": pokedexPage,
+    "/calculadora": calculadoraPage,
 
     "/auth/register": { POST: register },
     "/auth/login": { POST: login },
@@ -41,6 +43,8 @@ const server = Bun.serve({
     "/items": { GET: listAllItems },
 
     "/users/:username/teams": { GET: listUserTeams },
+    "/contacts": { GET: listMyContacts, POST: addMyContact },
+    "/contacts/:username": { DELETE: removeMyContact },
 
     "/teams": { POST: createTeam },
     "/teams/mine": { GET: listMyTeams },

@@ -14,6 +14,7 @@ async function main() {
   let catalog: Pokemon[] = [];
   let selected: number[] = [];
   let filter = "";
+  const genders: Record<number, string> = {};
 
   box.innerHTML = `<form class="card form" id="f">
     <h2>Criar time</h2>
@@ -30,7 +31,10 @@ async function main() {
   const nameOf = (id: number) => prettyName(catalog.find((p) => p.id === id)?.name ?? "");
   const drawChosen = () => {
     $("#count")!.textContent = `Pokémon escolhidos (${selected.length}/${MAX})`;
-    $("#chosen")!.innerHTML = selected.map((id) => `<li>${img(id, 40)}${esc(nameOf(id))}</li>`).join("");
+    $("#chosen")!.innerHTML = selected.map((id) => `<li>${img(id, 40)}${esc(nameOf(id))}
+      <select data-g="${id}"><option value="">Gênero: automático</option>
+        <option value="M" ${genders[id] === "M" ? "selected" : ""}>♂ Macho</option>
+        <option value="F" ${genders[id] === "F" ? "selected" : ""}>♀ Fêmea</option></select></li>`).join("");
   };
   const drawCatalog = () => {
     const term = filter.trim().toLowerCase().replaceAll(" ", "-");
@@ -42,6 +46,10 @@ async function main() {
 
   try { catalog = await api.listPokemon(); } catch (e) { $("#err")!.textContent = errorMessage(e); }
   drawChosen(); drawCatalog();
+  $("#chosen")!.onchange = (e) => {
+    const sel = e.target as HTMLSelectElement;
+    if (sel.dataset.g) genders[Number(sel.dataset.g)] = sel.value;
+  };
 
   $<HTMLInputElement>("#filter")!.oninput = (e) => { filter = (e.target as HTMLInputElement).value; drawCatalog(); };
   $("#catalog")!.onclick = (e) => {
@@ -62,6 +70,7 @@ async function main() {
         description: $<HTMLTextAreaElement>("#desc")!.value.trim() || undefined,
         is_public: $<HTMLInputElement>("#pub")!.checked,
         pokemon: selected,
+        genders: selected.map((id) => (genders[id] === "M" ? "M" : genders[id] === "F" ? "F" : null)),
       });
       location.href = "/";
     } catch (err) {

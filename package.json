@@ -17,12 +17,14 @@
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
     "typecheck": "tsc --noEmit",
-    "db:up": "docker compose up -d",
-    "db:migrate": "bun db/migrate.ts",
-    "db:seed": "bun db/seed.ts",
-    "db:reset": "bun db/reset.ts",
-    "db:import": "bun db/import-pokeapi.ts",
-    "db:import:base": "bun db/import-pokeapi.ts --sem-formas",
-    "db:presets": "bun db/seed-presets.ts"
+    "up": "docker compose up -d",
+    "migrate": "bun db/migrate.ts",
+    "seed": "bun db/seed.ts",
+    "reset": "bun db/reset.ts",
+    "import": "bun db/import-pokeapi.ts",
+    "import:base": "bun db/import-pokeapi.ts --sem-formas",
+    "presets": "bun db/seed-presets.ts",
+    "test": "bun test",
+    "coverage": "bun db/moves-coverage.ts"
   }
 }

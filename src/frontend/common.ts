@@ -64,7 +64,7 @@ export function authForm(box: HTMLElement, onDone: () => void): void {
 
 const NAV: [string, string][] = [
   ["/", "Meus times"], ["/criar", "Criar time"], ["/explorar", "Explorar usuários"],
-  ["/batalha", "Batalha"], ["/pokedex", "Pokédex"],
+  ["/batalha", "Batalha"], ["/calculadora", "Calculadora"], ["/pokedex", "Pokédex"],
 ];
 const PLACEHOLDER =
   "data:image/svg+xml," +
@@ -72,16 +72,35 @@ const PLACEHOLDER =
 
 export async function boot(active: string): Promise<void> {
   const user = session.user;
-  document.getElementById("header")!.innerHTML = `<h1>PokéWiki</h1><nav>
-    ${NAV.map(([href, label]) => `<a class="btn ${href === active ? "active" : ""}" href="${href}">${label}</a>`).join("")}
-    ${user ? `<button class="ghost" id="logout">Sair (${esc(user.username)})</button>` : ""}</nav>`;
-  $("#logout")?.addEventListener("click", () => { session.clear(); location.href = "/"; });
+  document.getElementById("header")!.innerHTML = `<h1><button class="brand" id="menu-btn" aria-expanded="false">PokéWiki ☰</button></h1>`;
 
+  // painel lateral com as outras páginas e o botão de sair
+  document.getElementById("sidebar")?.remove();
+  document.getElementById("sidebar-bg")?.remove();
+  const bg = document.createElement("div");
+  bg.id = "sidebar-bg";
+  const side = document.createElement("aside");
+  side.id = "sidebar";
+  side.innerHTML = `<h2>PokéWiki</h2>
+    <nav>${NAV.map(([href, label]) => `<a class="btn ${href === active ? "active" : ""}" href="${href}">${label}</a>`).join("")}</nav>
+    ${user ? `<div class="sidebar-user"><p class="muted small">Conectado como <strong>${esc(user.username)}</strong></p>
+      <button class="ghost" id="logout">Sair da conta</button></div>` : ""}`;
+  document.body.append(bg, side);
+  const toggle = (open: boolean) => {
+    side.classList.toggle("open", open);
+    bg.classList.toggle("open", open);
+    $("#menu-btn")?.setAttribute("aria-expanded", String(open));
+  };
+  $("#menu-btn")?.addEventListener("click", () => toggle(!side.classList.contains("open")));
+  bg.addEventListener("click", () => toggle(false));
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") toggle(false); });
+
+  $("#logout")?.addEventListener("click", () => { session.clear(); location.href = "/"; });
   window.addEventListener("pokewiki:logout", () => { location.href = "/"; });
   window.addEventListener("error", (e) => {
     const t = e.target;
     if (t instanceof HTMLImageElement && !t.dataset.fallback) { t.dataset.fallback = "1"; t.src = PLACEHOLDER; }
   }, true);
 
-  try { registerSprites(await api.listPokemon()); } catch { } // segue sem os sprites do banco
+  try { registerSprites(await api.listPokemon()); } catch { /* segue sem os sprites do banco */ }
 }

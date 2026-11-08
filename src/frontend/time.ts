@@ -104,7 +104,7 @@ async function drawEditor(m: Member) {
       <label>Apelido<input id="nick" maxlength="50" value="${esc(m.nickname ?? "")}"></label>
       <label>Nível<input id="level" type="number" min="1" max="100" value="${m.level}"></label></div>
     <div class="row">
-      <label>Natureza<select id="nature">${NATURE_NAMES.map((n) => `<option value="${n}" ${n === m.nature ? "selected" : ""}>${esc(prettyName(n))} (${esc(natureLabel(n))})</option>`).join("")}</select></label>
+        <label>Gênero${genderSelect(detail.gender_rate, m.gender)}</label><label>Natureza<select id="nature">${NATURE_NAMES.map((n) => `<option value="${n}" ${n === m.nature ? "selected" : ""}>${esc(prettyName(n))} (${esc(natureLabel(n))})</option>`).join("")}</select></label>
       <label>Habilidade<select id="ability"><option value="">— nenhuma —</option>${detail.abilities.map((a) => `<option value="${a.id}" ${a.id === m.ability?.id ? "selected" : ""}>${esc(prettyName(a.name))}${a.is_hidden ? " (oculta)" : ""}</option>`).join("")}</select></label></div>
     <label>Item<input id="item" list="items-list" value="${esc(m.item ? prettyName(m.item.name) : "")}" placeholder="Digite para buscar (ex: Choice Band, Eviolite)"></label>
     <datalist id="items-list">${items.map((i) => `<option value="${esc(prettyName(i.name))}"></option>`).join("")}</datalist>
@@ -193,6 +193,7 @@ async function drawEditor(m: Member) {
     try {
       await api.updateMember(team.id, m.id, {
         nickname: val("nick").trim() || null, level: level(), nature: val("nature"),
+          gender: (["M", "F"] as const).find((g) => g === val("gender")) ?? null,
         ability_id: Number(val("ability")) || null, item_id: itemId, ivs, evs, moves,
       });
       await load();
@@ -248,4 +249,12 @@ async function main() {
   };
   drawTab();
 }
+function genderSelect(rate: number | null, cur: "M" | "F" | null): string {
+    if (rate === -1) return `<select id="gender" disabled><option value="">Sem gênero</option></select>`;
+    if (rate === 0) return `<select id="gender" disabled><option value="M">♂ Sempre macho</option></select>`;
+    if (rate === 8) return `<select id="gender" disabled><option value="F">♀ Sempre fêmea</option></select>`;
+    return `<select id="gender"><option value="" ${!cur ? "selected" : ""}>Automático</option>
+      <option value="M" ${cur === "M" ? "selected" : ""}>♂ Macho</option>
+      <option value="F" ${cur === "F" ? "selected" : ""}>♀ Fêmea</option></select>`;
+  }
 void main();

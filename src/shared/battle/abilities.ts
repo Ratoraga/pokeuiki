@@ -2,16 +2,11 @@ import { BALL, BITE, POWDER, PULSE, PUNCH, SLICE, SOUND, isContact } from "./dat
 import type { BattleMoveData, Mon, Rng, StageKey, StatKey5, Status, Terrain, Weather } from "./types";
 
 /** Habilidades sem efeito simulado: mudança de forma, só para duplas ou sem efeito em batalha. */
+/** Habilidades sem efeito em batalhas 1 contra 1 (agem sobre aliados ou fora de batalha), como no jogo. */
 export const NO_EFFECT_ABILITIES = new Set([
-  "illuminate", "honey-gather", "pickup", "ball-fetch", "run-away", "telepathy", "friend-guard", "healer",
-  "plus", "minus", "flower-veil", "aroma-veil", "symbiosis", "receiver", "power-of-alchemy", "costar",
-  "commander", "hospitality", "curious-medicine", "power-spot", "battery", "stalwart", "propeller-tail",
-  "anticipation", "forewarn", "frisk", "klutz", "multitype", "rks-system", "forecast", "zen-mode",
-  "stance-change", "schooling", "shields-down", "power-construct", "battle-bond", "hunger-switch",
-  "zero-to-hero", "tera-shift", "teraform-zero", "poison-puppeteer", "gulp-missile", "opportunist",
-  "cud-chew", "illusion", "stall", "mycelium-might", "dancer", "gluttony", "quick-draw", "wind-rider",
-  "wind-power", "supreme-overlord", "embody-aspect-teal", "embody-aspect-wellspring",
-  "embody-aspect-hearthflame", "embody-aspect-cornerstone", "ability-shield", "as-one-glastrier-no",
+  "ball-fetch", "battery", "commander", "costar", "curious-medicine", "friend-guard", "gluttony", "healer",
+  "honey-gather", "hospitality", "minus", "plus", "power-of-alchemy", "power-spot", "propeller-tail",
+  "receiver", "run-away", "stalwart", "symbiosis", "telepathy",
 ]);
 
 const WEATHER_ABILITY: Record<string, Weather> = {
@@ -48,8 +43,8 @@ export function speedMult(m: Mon, w: Weather | null, t: Terrain | null): number 
 /** Protosynthesis / Quark Drive: o maior status é turbinado. */
 function boostedKey(m: Mon, w: Weather | null, t: Terrain | null): StatKey5 | null {
   const on =
-    (m.ability === "protosynthesis" && (w === "sun" || m.item === "booster-energy")) ||
-    (m.ability === "quark-drive" && (t === "electric" || m.item === "booster-energy"));
+    (m.ability === "protosynthesis" && (w === "sun" || m.flags.booster)) ||
+    (m.ability === "quark-drive" && (t === "electric" || m.flags.booster));
   if (!on) return null;
   const keys = ["atk", "def", "spa", "spd", "spe"] as const;
   let best: StatKey5 = "atk";
@@ -80,7 +75,7 @@ const ATE = new Set(["pixilate", "refrigerate", "aerilate", "galvanize", "dragon
 
 export function powerMult(
   att: Mon, move: BattleMoveData, type: string,
-  c: { weather: Weather | null; movedLast: boolean; converted: boolean; hasSecondary: boolean; power: number }
+  c: { weather: Weather | null; movedLast: boolean; converted: boolean; hasSecondary: boolean; power: number; fainted: number; gender?: "same" | "opposite" | "none" }
 ): number {
   const a = att.ability ?? "";
   let m = 1;
@@ -101,7 +96,9 @@ export function powerMult(
   if ((a === "steelworker" || a === "steely-spirit") && type === "steel") m *= 1.5;
   if (a === "rocky-payload" && type === "rock") m *= 1.5;
   if (a === "punk-rock" && SOUND.has(move.name)) m *= 1.3;
-  if (a === "rivalry") m *= 1;
+  if (a === "rivalry") m *= c.gender === "same" ? 1.25 : c.gender === "opposite" ? 0.75 : 1;
+  if (a === "supreme-overlord") m *= 1 + 0.1 * Math.min(5, c.fainted);
+  if (a === "normalize") m *= 1.2;
   if (PINCH[a] === type && att.hp * 3 <= att.maxHp) m *= 1.5;
   if (c.converted && ATE.has(a)) m *= 1.2;
   if (att.v.flashFire && type === "fire") m *= 1.5;
@@ -132,6 +129,11 @@ export const attackerDamageMult = (att: Mon, eff: number) =>
 export function blocksStatus(m: Mon, st: Status, terrain: Terrain | null, grounded: boolean, w: Weather | null): boolean {
   const a = m.ability;
   if (a === "purifying-salt" || a === "comatose") return true;
+  if (m.flags.vSweetVeil && st === "slp") return true;
+  if (m.flags.vPastelVeil && (st === "psn" || st === "tox")) return true;
+  if (m.flags.vFlowerVeil && m.types.includes("grass")) return true;
+  if (a === "flower-veil" && m.types.includes("grass")) return true;
+  if (a === "shields-down" && m.form !== "core" && m.data.forms?.core) return true;
   if (a === "leaf-guard" && w === "sun") return true;
   if (terrain === "misty" && grounded) return true;
   switch (st) {
@@ -191,6 +193,8 @@ export function onKoBoost(att: Mon): [StageKey, number] | null {
 
 export function blocksDrop(t: Mon, key: StageKey): boolean {
   const a = t.ability;
+  if (t.flags.vFlowerVeil && t.types.includes("grass")) return true;
+  if (a === "flower-veil" && t.types.includes("grass")) return true;
   if (a === "clear-body" || a === "white-smoke" || a === "full-metal-body") return true;
   return (a === "hyper-cutter" && key === "atk") || (a === "keen-eye" && key === "acc") || (a === "big-pecks" && key === "def") || (a === "minds-eye" && key === "acc");
 }
@@ -238,3 +242,5 @@ export function contactEffect(def: Mon, rng: Rng): { damageFrac?: number; status
     default: return null;
   }
 }
+export const evasionStage = (att: Mon, def: Mon) =>
+  ["keen-eye", "minds-eye", "unaware"].includes(att.ability ?? "") ? 0 : def.stages.eva;

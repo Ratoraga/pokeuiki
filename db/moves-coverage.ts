@@ -38,15 +38,15 @@ const dir = `${import.meta.dir}/../src/shared`;
 const source = ["battle/abilities.ts", "battle/engine.ts", "battle/data.ts", "modifiers.ts"]
   .map((f) => readFileSync(`${dir}/${f}`, "utf8"))
   .join("\n");
-// vale o nome entre aspas ("blaze") ou como chave de objeto (blaze:)
+
 const mentioned = (n: string) => source.includes(`"${n}"`) || new RegExp(`(^|[^\\w-])${n}\\s*:`).test(source);
 
 const abilities = (await sql`SELECT name, description FROM abilities ORDER BY name`) as { name: string; description: string | null }[];
 const noEffect = abilities.filter((a) => NO_EFFECT_ABILITIES.has(a.name)).map((a) => a.name);
 const unhandled = abilities.filter((a) => !NO_EFFECT_ABILITIES.has(a.name) && !mentioned(a.name));
 
-console.log(`\nHabilidades: ${abilities.length - noEffect.length - unhandled.length} implementadas, ${noEffect.length} sem efeito simulado, ${unhandled.length} não tratadas`);
-console.log(`\nSem efeito simulado: ${noEffect.join(", ")}`);
+console.log(`\nHabilidades: ${abilities.length - noEffect.length - unhandled.length} implementadas, ${noEffect.length} sem efeito em 1 contra 1 (como no jogo), ${unhandled.length} não tratadas`);
+console.log(`\nSem efeito em 1 contra 1: ${noEffect.join(", ")}`);
 for (const a of unhandled) console.log(`\nNão tratada: ${a.name} — ${a.description || "(sem descrição)"}`);
 
 await sql.close();

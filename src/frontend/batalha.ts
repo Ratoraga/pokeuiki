@@ -3,10 +3,11 @@ import { chooseAction, chooseReplacement, setBotLevel, type BotLevel } from "../
 import { Z_CRYSTALS, Z_MOVE_NAMES, isSupported } from "../shared/battle/data";
 import {
   activeMon, canDynamax, canGigantamax, canMega, canSwitch, canTera, canZ, createBattle, effMove,
-  hasGimmick, monName, playTurn, replaceFainted, resumePivot, setMoveCatalog, setTypeChart, usableMoves,
+  hasGimmick, monName, playTurn, replaceFainted, resumePivot, setMoveCatalog, setTypeChart, usableMoves, shownMon
 } from "../shared/battle/engine";
 import type { Action, BattleState, BattleTeamData, Gimmick, Mon, SideState } from "../shared/battle/types";
 import { TYPES } from "../shared/pokemonTypes";
+import { startDoubles } from "./dupla";
 import { api, errorMessage, session } from "./api";
 import { $, app, boot, esc, img, typeBadge } from "./common";
 import { prettyName, typeLabel } from "./format";
@@ -21,12 +22,14 @@ const TERRAIN_LABEL: Record<string, string> = { electric: "⚡ Terreno Elétrico
 const hpClass = (pct: number) => (pct > 50 ? "hp-green" : pct > 20 ? "hp-yellow" : "hp-red");
 
 function monSprite(mon: Mon): string {
+  const f = mon.form ? mon.data.forms?.[mon.form] : undefined;
+  if (f?.sprite) return f.sprite;
   if (mon.mega && mon.data.mega?.sprite) return mon.data.mega.sprite;
   if (mon.flags.gmax && mon.data.gmax?.sprite) return mon.data.gmax.sprite;
   return mon.data.sprite ?? spriteUrl(mon.data.pokemon_id);
 }
 
-function monPanel(mon: Mon, owner: string, back: boolean): string {
+function monPanel(mon: Mon, owner: string, back: boolean, shown?: { name: string; pokemonId: number; sprite: string | null }): string {
   const pct = Math.round((mon.hp / mon.maxHp) * 100);
   const stages = Object.entries(mon.stages).filter(([, v]) => v !== 0).map(([k, v]) => `${k.toUpperCase()} ${v > 0 ? "+" : ""}${v}`);
   const tags = [
@@ -35,9 +38,9 @@ function monPanel(mon: Mon, owner: string, back: boolean): string {
     mon.v.substitute > 0 ? "Substituto" : null, mon.v.confusion > 0 ? "Confuso" : null,
     mon.v.leechSeed ? "Semeado" : null, mon.v.taunt > 0 ? "Provocado" : null,
   ].filter((t): t is string => t !== null);
-  return `<div class="mon-panel"><img class="sprite ${back ? "back" : ""}" src="${esc(monSprite(mon))}" alt="">
+  return `<div class="mon-panel"><img class="sprite ${back ? "back" : ""}" src="${esc(shown ? (shown.sprite ?? spriteUrl(shown.pokemonId)) : monSprite(mon))}" alt="">
     <div class="info"><small class="muted">${esc(owner)}</small>
-    <div><strong>${esc(monName(mon))}</strong> <span class="muted">Nv. ${mon.data.level}</span>${mon.status ? `<span class="status-badge">${STATUS_LABEL[mon.status]}</span>` : ""}</div>
+    <div><strong>${esc(shown?.name ?? monName(mon))}</strong> <span class="muted">Nv. ${mon.data.level}</span>${mon.status ? `<span class="status-badge">${STATUS_LABEL[mon.status]}</span>` : ""}</div>
     <div class="hpbar"><div class="hpfill ${hpClass(pct)}" style="width:${pct}%"></div></div>
     <small>${mon.hp}/${mon.maxHp} (${pct}%)</small>
     ${tags.length + stages.length > 0 ? `<div class="stages">${esc([...tags, ...stages].join(" · "))}</div>` : ""}</div></div>`;
@@ -160,7 +163,7 @@ function startBattle(box: HTMLElement, player: BattleTeamData, bot: BattleTeamDa
 
     box.innerHTML = `<section class="battle">
       ${chips.length ? `<div class="field-chips">${chips.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}</div>` : ""}
-      <div class="arena">${monPanel(foe, `Bot · ${bot.name}`, false)}${monPanel(me, `Você · ${player.name}`, true)}</div>
+      <div class="arena">${monPanel(foe, `Bot · ${bot.name}`, false, shownMon(state, 1))}${monPanel(me, `Você · ${player.name}`, true)}</div>
       ${over ? `<div class="card banner"><h2>${state.winner === 0 ? "Você venceu! 🎉" : "O bot venceu."}</h2>
         <div class="actions center"><button class="primary" data-a="restart">Jogar de novo</button><button data-a="exit">Escolher outros times</button></div></div>` : ""}
       ${!over && mustPick ? `<div class="card"><h3>${state.pivot === 0 ? "Escolha quem entra no lugar" : "Escolha o próximo Pokémon"}</h3></div>` : ""}
@@ -207,47 +210,62 @@ async function main() {
 
   let playerChoice: number | null = null;
   let botChoice: number | "random" = "random";
+  let level: BotLevel = "hard";
+  let mode: "single" | "doubles" = "single";
   let error = "";
   let loading = false;
-  let level: BotLevel = "hard";
 
   const option = (t: Team, group: string, checked: boolean) => `<label class="team-option ${checked ? "selected" : ""}">
     <input type="radio" name="${group}" value="${t.id}" ${checked ? "checked" : ""}><div><strong>${esc(t.name)}</strong>
     ${t.description ? `<div class="muted small">${esc(t.description)}</div>` : ""}
     <div class="mini-sprites">${t.pokemon.map((p) => img(p.pokemon_id, 36)).join("")}</div></div></label>`;
-  const list = (group: string, isChecked: (id: number) => boolean) => `<h4 class="muted">Times prontos</h4>
-    ${presets.map((t) => option(t, group, isChecked(t.id))).join("")}
+
+  // Lado do jogador: só os times dele (sem os times prontos)
+  const playerList = (): string =>
+    !user ? `<p class="muted">Entre na sua conta para usar seus próprios times.</p>`
+    : mine.length === 0 ? `<p class="muted">Você ainda não tem times com Pokémon. Use "Criar time" no menu.</p>`
+    : mine.map((t) => option(t, "player", playerChoice === t.id)).join("");
+
+  // Lado do bot: times prontos e os seus
+  const botList = (): string => `<h4 class="muted">Times prontos</h4>
+    ${presets.map((t) => option(t, "bot", botChoice === t.id)).join("")}
     <h4 class="muted">Seus times salvos</h4>
-    ${!user ? `<p class="muted">Entre na sua conta para usar seus próprios times.</p>` : mine.length === 0 ? `<p class="muted">Você ainda não tem times com Pokémon.</p>` : ""}
-    ${mine.map((t) => option(t, group, isChecked(t.id))).join("")}`;
+    ${mine.length === 0 ? `<p class="muted">Nenhum.</p>` : mine.map((t) => option(t, "bot", botChoice === t.id)).join("")}`;
 
   function drawSetup() {
     box.innerHTML = `<section><h2>Batalha contra o bot</h2>
-      <p class="muted">6 contra 6, com clima, terrenos, armadilhas, Mega Evolução, Terastalização, Dynamax/Gigantamax e Z-Moves. O bot enxerga seu time, pontua cada golpe pelo dano esperado, prioriza nocautes, faz setup, usa armadilhas e troca de Pokémon quando o confronto está desfavorável.</p>
+      <p class="muted">Clima, terrenos, armadilhas, Mega Evolução, Terastalização, Dynamax/Gigantamax e Z-Moves. Escolha os times e, no fim da página, o modo e a dificuldade.</p>
       ${presets.length === 0 ? `<p class="error">Os times prontos ainda não foram criados. Rode: <code>bun run db:presets</code></p>` : ""}
       <div class="setup-grid">
-        <div class="card"><h3>Seu time</h3>${list("player", (id) => playerChoice === id)}</div>
+        <div class="card"><h3>Seu time</h3>${playerList()}</div>
         <div class="card"><h3>Time do bot</h3>
-          <label class="team-option ${botChoice === "random" ? "selected" : ""}"><input type="radio" name="bot" value="random" ${botChoice === "random" ? "checked" : ""}><strong>Aleatório (prontos e seus)</strong></label>
-          ${list("bot", (id) => botChoice === id)}</div></div>
-      <label class="form" style="max-width:380px">Dificuldade do bot
-        <select id="level">
-          <option value="normal" ${level === "normal" ? "selected" : ""}>Normal (regras, instantâneo)</option>
+          <label class="team-option ${botChoice === "random" ? "selected" : ""}"><input type="radio" name="bot" value="random" ${botChoice === "random" ? "checked" : ""}><strong>Aleatório</strong></label>
+          ${botList()}</div></div>
+      <div class="card"><h3>Opções da batalha</h3><div class="row">
+        <label>Modo <select id="mode">
+          <option value="single" ${mode === "single" ? "selected" : ""}>Individual (1×1)</option>
+          <option value="doubles" ${mode === "doubles" ? "selected" : ""}>Duplas (2×2)</option></select></label>
+        <label>Dificuldade do bot <select id="level">
+          <option value="normal" ${level === "normal" ? "selected" : ""}>Normal</option>
           <option value="hard" ${level === "hard" ? "selected" : ""}>Difícil (simula o próximo turno)</option>
-          <option value="master" ${level === "master" ? "selected" : ""}>Mestre (simula dois turnos)</option>
-        </select></label>
+          <option value="master" ${level === "master" ? "selected" : ""}>Mestre (simula mais a fundo)</option></select></label></div></div>
       ${error ? `<p class="error">${esc(error)}</p>` : ""}
       <div class="actions"><button class="primary" id="start" ${loading || playerChoice === null || presets.length === 0 ? "disabled" : ""}>${loading ? "Carregando..." : "Começar batalha"}</button></div></section>`;
   }
 
   box.onchange = (e) => {
     const t = e.target;
-    if (t instanceof HTMLSelectElement && t.id === "level") { level = t.value as BotLevel; return; }
+    if (t instanceof HTMLSelectElement) {
+      if (t.id === "level") level = t.value as BotLevel;
+      if (t.id === "mode") mode = t.value === "doubles" ? "doubles" : "single";
+      return;
+    }
     if (!(t instanceof HTMLInputElement) || t.type !== "radio") return;
     if (t.name === "player") playerChoice = Number(t.value);
     if (t.name === "bot") botChoice = t.value === "random" ? "random" : Number(t.value);
     drawSetup();
   };
+
   box.onclick = async (e) => {
     if (!(e.target as HTMLElement).closest("#start") || playerChoice === null) return;
     const pool = [...presets, ...mine];
@@ -263,7 +281,8 @@ async function main() {
       loading = false;
       box.onchange = null;
       setBotLevel(level);
-      startBattle(box, player, bot, () => location.reload());
+      if (mode === "doubles") startDoubles(box, player.mons, bot.mons, () => location.reload());
+      else startBattle(box, player, bot, () => location.reload());
     } catch (err) {
       loading = false;
       error = errorMessage(err);
@@ -272,4 +291,7 @@ async function main() {
   };
   drawSetup();
 }
-void main();
+main().catch((e) => {
+  document.getElementById("app")!.innerHTML =
+    `<p class="error">Erro: ${String(e instanceof Error ? (e.stack ?? e.message) : e)}</p>`;
+});

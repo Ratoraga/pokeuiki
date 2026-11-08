@@ -60,7 +60,7 @@ function matchup(s: BattleState, side: SideIndex, a: Mon): number {
   return v;
 }
 
-function scoreMove(s: BattleState, side: SideIndex, index: number): number {
+export function scoreMove(s: BattleState, side: SideIndex, index: number): number {
   const me = activeMon(s, side);
   const fSide = otherSide(side);
   const foe = activeMon(s, fSide);
@@ -139,7 +139,7 @@ function scoreMove(s: BattleState, side: SideIndex, index: number): number {
   }
   if (spec.pivot) return matchup(s, side, me) < -20 ? 30 : -10;
 
-    if (spec.noop) return -200;
+  if (spec.noop) return -200;
   if (Object.keys(spec).length > 0) return 8;
   switch (move.category) {
     case "ailment": {
@@ -192,7 +192,7 @@ function considerSwitch(s: BattleState, side: SideIndex, bestScore: number): num
   if (s.lastWasSwitch[side]) return null;
   const st = s.sides[side];
   const me = at(st.team, st.active);
-    if (!canSwitch(s, side)) return null;
+  if (!canSwitch(s, side)) return null;
   const fSide = otherSide(side);
   const foe = activeMon(s, fSide);
   const bench = st.team.map((m, i) => ({ m, i })).filter(({ m, i }) => !m.fainted && i !== st.active);
@@ -215,7 +215,7 @@ function considerSwitch(s: BattleState, side: SideIndex, bestScore: number): num
   return best && best.value > stay + 35 ? best.i : null;
 }
 
-function pickGimmick(s: BattleState, side: SideIndex, moveIndex: number): Pick<Extract<Action, { kind: "move" }>, "gimmick" | "teraType" | "gmax"> {
+export function pickGimmick(s: BattleState, side: SideIndex, moveIndex: number): Pick<Extract<Action, { kind: "move" }>, "gimmick" | "teraType" | "gmax"> {
   const me = activeMon(s, side);
   const foe = activeMon(s, otherSide(side));
   const alive = s.sides[side].team.filter((m) => !m.fainted).length;
@@ -279,6 +279,7 @@ export function chooseReplacementHeuristic(s: BattleState, side: SideIndex): num
 export type BotLevel = "normal" | "hard" | "master";
 let LEVEL: BotLevel = "hard";
 export function setBotLevel(level: BotLevel): void { LEVEL = level; }
+export const getBotLevel = (): BotLevel => LEVEL;
 
 const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
 const clampN = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
@@ -296,7 +297,7 @@ function mulberry32(seed: number): Rng {
   };
 }
 
-// ---------- avaliação de um estado (do ponto de vista de `side`) ----------
+// ---------- avaliação de um estado (do ponto de vista do bot) ----------
 const STATUS_PEN: Record<Status, number> = { slp: 0.4, frz: 0.45, par: 0.2, brn: 0.2, psn: 0.12, tox: 0.2 };
 
 function evaluate(s: BattleState, side: SideIndex): number {
@@ -455,8 +456,7 @@ function theirCandidates(s: BattleState, side: SideIndex): { actions: Action[]; 
   return { actions: [...moves, ...switches], prior: raw.map((x) => x / total) };
 }
 
-// ---------- equilíbrio do jogo de matriz (Hedge) ----------
-function equilibriumCols(M: number[][], iters = 500): number[] {
+export function equilibriumCols(M: number[][], iters = 500): number[] {
   const R = M.length;
   const C = M[0]?.length ?? 0;
   if (C === 0) return [];
@@ -523,7 +523,7 @@ export function chooseAction(s: BattleState, side: SideIndex, rng: Rng): Action 
   try { return searchAction(s, side, rng); } catch { return chooseHeuristic(s, side, rng); }
 }
 
-/** Escolhe o substituto (após desmaio ou U-turn) olhando o confronto que ele vai enfrentar. */
+/** Escolhe o substituto (após desmaio ou swaping moves) olhando o confronto que ele vai enfrentar. */
 export function chooseReplacement(s: BattleState, side: SideIndex): number {
   if (LEVEL === "normal") return chooseReplacementHeuristic(s, side);
   const bench: number[] = [];

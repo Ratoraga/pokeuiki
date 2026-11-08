@@ -85,6 +85,7 @@ export async function createTeamWithPokemon(input: {
   description: string | null;
   isPublic: boolean;
   pokemonIds: number[];
+  genders?: ("M" | "F" | null)[];
 }): Promise<Team> {
   return sql.begin(async (tx: SQL) => {
     const [team] = (await tx`
@@ -96,8 +97,8 @@ export async function createTeamWithPokemon(input: {
 
     for (const [i, pokemonId] of input.pokemonIds.entries()) {
       await tx`
-        INSERT INTO team_pokemon (team_id, pokemon_id, slot, ability_id)
-        VALUES (${team.id}, ${pokemonId}, ${i + 1},
+        INSERT INTO team_pokemon (team_id, pokemon_id, slot, gender, ability_id)
+        VALUES (${team.id}, ${pokemonId}, ${i + 1}, ${input.genders?.[i] ?? null},
           (SELECT ability_id FROM pokemon_abilities
            WHERE pokemon_id = ${pokemonId} ORDER BY is_hidden, ability_id LIMIT 1))`;
     }
@@ -110,7 +111,7 @@ export async function createTeamWithPokemon(input: {
 // ---------------------------------------------------------------
 interface MemberRow {
   id: number; slot: number; pokemon_id: number; nickname: string | null;
-  level: number; nature: string;
+  level: number; nature: string; gender: "M" | "F" | null;
   ability_id: number | null; ability_name: string | null;
   item_id: number | null; item_name: string | null;
   iv_hp: number; iv_atk: number; iv_def: number; iv_spa: number; iv_spd: number; iv_spe: number;
@@ -130,7 +131,7 @@ export async function getTeamDetail(teamId: number, viewerId: number | null): Pr
   if (!team || (!team.is_public && team.user_id !== viewerId)) return null;
 
   const rows = (await sql`
-    SELECT tp.id, tp.slot, tp.pokemon_id, tp.nickname, tp.level, tp.nature,
+    SELECT tp.id, tp.slot, tp.pokemon_id, tp.nickname, tp.level, tp.nature, tp.gender,
            tp.ability_id, a.name AS ability_name, tp.item_id, i.name AS item_name,
            tp.iv_hp, tp.iv_atk, tp.iv_def, tp.iv_spa, tp.iv_spd, tp.iv_spe,
            tp.ev_hp, tp.ev_atk, tp.ev_def, tp.ev_spa, tp.ev_spd, tp.ev_spe,
@@ -170,6 +171,7 @@ export async function getTeamDetail(teamId: number, viewerId: number | null): Pr
     nickname: r.nickname,
     level: r.level,
     nature: r.nature,
+    gender: r.gender,
     ability: r.ability_id !== null && r.ability_name !== null ? { id: r.ability_id, name: r.ability_name } : null,
     item: r.item_id !== null && r.item_name !== null ? { id: r.item_id, name: r.item_name } : null,
     base: { hp: r.base_hp, atk: r.base_atk, def: r.base_def, spa: r.base_spa, spd: r.base_spd, spe: r.base_spe },
@@ -239,7 +241,7 @@ export async function updateMemberBuild(
   await sql.begin(async (tx: SQL) => {
     await tx`
       UPDATE team_pokemon SET
-        nickname = ${build.nickname}, level = ${build.level}, nature = ${build.nature},
+        nickname = ${build.nickname}, level = ${build.level}, nature = ${build.nature}, gender = ${build.gender},
         ability_id = ${build.ability_id}, item_id = ${build.item_id},
         iv_hp = ${ivs.hp}, iv_atk = ${ivs.atk}, iv_def = ${ivs.def},
         iv_spa = ${ivs.spa}, iv_spd = ${ivs.spd}, iv_spe = ${ivs.spe},
@@ -377,10 +379,10 @@ export async function copyTeamToUser(sourceId: number, userId: number): Promise<
       if (!created) throw new Error("Falha ao copiar o time");
 
       await tx`
-        INSERT INTO team_pokemon (team_id, pokemon_id, slot, nickname, level, nature, ability_id, item_id,
+        INSERT INTO team_pokemon (team_id, pokemon_id, slot, nickname, level, nature, gender, ability_id, item_id,
                                   iv_hp, iv_atk, iv_def, iv_spa, iv_spd, iv_spe,
                                   ev_hp, ev_atk, ev_def, ev_spa, ev_spd, ev_spe)
-        SELECT ${created.id}::int, pokemon_id, slot, nickname, level, nature, ability_id, item_id,
+        SELECT ${created.id}::int, pokemon_id, slot, nickname, level, nature, gender, ability_id, item_id,
                iv_hp, iv_atk, iv_def, iv_spa, iv_spd, iv_spe,
                ev_hp, ev_atk, ev_def, ev_spa, ev_spd, ev_spe
         FROM team_pokemon

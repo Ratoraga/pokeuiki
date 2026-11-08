@@ -7,6 +7,7 @@ import type {
 } from "./shared/battle/types";
 import { applyStatModifiers } from "./shared/modifiers";
 import { calcStats } from "./shared/stats";
+import { resolveGender } from "./shared/gender";
 
 interface MoveMeta {
   id: number; priority: number; target: string | null; category: string | null; ailment: string | null;
@@ -80,6 +81,56 @@ async function gmaxFor(m: Member): Promise<BattleGmaxData | null> {
   return { pokemon_id: p?.id ?? m.pokemon_id, sprite: p?.sprite ?? null };
 }
 
+/** Forma que cada habilidade de mudança de forma usa (nomes da PokeAPI). */
+function formMap(name: string, ability: string | null): Record<string, string> {
+  switch (ability) {
+    case "battle-bond": return name.startsWith("greninja") ? { ash: "greninja-ash" } : {};
+    case "zen-mode": return name === "darmanitan-standard" ? { zen: "darmanitan-zen" } : name === "darmanitan-galar-standard" ? { zen: "darmanitan-galar-zen" } : {};
+    case "schooling": return name.startsWith("wishiwashi") ? { school: "wishiwashi-school" } : {};
+    case "shields-down": { const r = /^minior-(.+)-meteor$/.exec(name); return r ? { core: `minior-${r[1]}` } : {}; }
+    case "power-construct": return name.startsWith("zygarde") && !name.includes("complete") ? { complete: "zygarde-complete" } : {};
+    case "stance-change": return name === "aegislash-shield" ? { blade: "aegislash-blade" } : {};
+    case "zero-to-hero": return name.startsWith("palafin") ? { hero: "palafin-hero" } : {};
+    case "tera-shift": return name.startsWith("terapagos") ? { terastal: "terapagos-terastal", stellar: "terapagos-stellar" } : {};
+    default: return {};
+  }
+}
+
+async function loadForm(slug: string, m: Member, item: string | null, normalHp: number): Promise<BattleMegaData | null> {
+  const [p] = (await sql`
+    SELECT id, name, type1, type2, NULLIF(sprite, '') AS sprite,
+           base_hp, base_atk, base_def, base_spa, base_spd, base_spe
+    FROM pokemon WHERE name = ${slug}`) as {
+    id: number; name: string; type1: string; type2: string | null; sprite: string | null;
+    base_hp: number; base_atk: number; base_def: number; base_spa: number; base_spd: number; base_spe: number;
+  }[];
+  if (!p) return null; // forma não importada
+
+  const [ab] = (await sql`
+    SELECT a.name FROM pokemon_abilities pa JOIN abilities a ON a.id = pa.ability_id
+    WHERE pa.pokemon_id = ${p.id} ORDER BY pa.is_hidden, pa.ability_id LIMIT 1`) as { name: string }[];
+  const ability = ab?.name ?? null;
+  const raw = calcStats(
+    { hp: p.base_hp, atk: p.base_atk, def: p.base_def, spa: p.base_spa, spd: p.base_spd, spe: p.base_spe },
+    m.ivs, m.evs, m.level, m.nature
+  );
+  const { stats } = applyStatModifiers(raw, { ability, item, speciesId: p.id, canEvolve: false });
+  return {
+    pokemon_id: p.id, sprite: p.sprite, species: p.name,
+    types: p.type2 ? [p.type1, p.type2] : [p.type1],
+    stats: { ...stats, hp: normalHp }, ability,
+  };
+}
+
+async function formsFor(m: Member, ability: string | null, item: string | null, normalHp: number): Promise<Record<string, BattleMegaData> | null> {
+  const out: Record<string, BattleMegaData> = {};
+  for (const [key, slug] of Object.entries(formMap(m.name, ability))) {
+    const f = await loadForm(slug, m, item, normalHp);
+    if (f) out[key] = f;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 export async function getBattleTeam(teamId: number, viewerId: number | null): Promise<BattleTeamResult> {
   const team = await getTeamDetail(teamId, viewerId);
   if (!team) return { ok: false, status: 404, error: "Time não encontrado" };
@@ -105,9 +156,9 @@ export async function getBattleTeam(teamId: number, viewerId: number | null): Pr
 
   const pokemonIds = team.members.map((m) => m.pokemon_id);
   const infoRows = (await sql`
-    SELECT id, weight, NULLIF(sprite, '') AS sprite FROM pokemon
+    SELECT id, weight, sprite, gender_rate FROM pokemon
     WHERE id IN (SELECT t.value::int FROM jsonb_array_elements_text(${JSON.stringify(pokemonIds)}::text::jsonb) AS t(value))`) as {
-    id: number; weight: number | null; sprite: string | null;
+    id: number; weight: number | null; sprite: string | null; gender_rate: number | null;
   }[];
   const info = new Map(infoRows.map((r) => [r.id, r] as [number, (typeof infoRows)[number]]));
 
@@ -116,15 +167,16 @@ export async function getBattleTeam(teamId: number, viewerId: number | null): Pr
     const ability = m.ability?.name ?? null;
     const item = m.item?.name ?? null;
     const raw = calcStats(m.base, m.ivs, m.evs, m.level, m.nature);
-    const { stats } = applyStatModifiers(raw, { ability, item, speciesId: m.species_id, canEvolve: m.can_evolve });
+    const { stats } = applyStatModifiers(raw, { ability, item: ability === "klutz" ? null : item, speciesId: m.species_id, canEvolve: m.can_evolve });
     const row = info.get(m.pokemon_id);
 
     mons.push({
       pokemon_id: m.pokemon_id, species_id: m.species_id, species: m.name, nickname: m.nickname,
       types: m.type2 ? [m.type1, m.type2] : [m.type1], level: m.level, stats, ability, item,
       weight: (row?.weight ?? 600) / 10, sprite: row?.sprite ?? null,
+      gender: resolveGender(m.gender, row?.gender_rate), nature: m.nature,
       moves: m.moves.map((mv) => applyMoveFix(toBattleMove(mv, meta.get(mv.id)))),
-      mega: await megaFor(m, stats.hp),
+      mega: await megaFor(m, stats.hp),       forms: await formsFor(m, ability, ability === "klutz" ? null : item, stats.hp),
       gmax: await gmaxFor(m),
     });
   }

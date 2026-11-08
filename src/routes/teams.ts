@@ -17,7 +17,8 @@ interface CreateTeamBody {
   name?: string;
   description?: string;
   is_public?: boolean;
-  pokemon?: number[]; // ids dos Pokémon, na ordem dos slots
+  pokemon?: number[];
+  genders?: unknown[];
 }
 
 export async function createTeam(req: Request) {
@@ -27,7 +28,7 @@ export async function createTeam(req: Request) {
   const body = await readJson<CreateTeamBody>(req);
   if (!body?.name) return error("name é obrigatório", 400);
 
-  const { name, description = null, is_public = false, pokemon = [] } = body;
+  const { name, description = null, is_public = false, pokemon = [], genders = [] } = body;
   if (pokemon.length > 6) return error("Um time pode ter no máximo 6 Pokémon", 400);
 
   try {
@@ -37,6 +38,7 @@ export async function createTeam(req: Request) {
       description,
       isPublic: is_public,
       pokemonIds: pokemon,
+      genders: genders.map((g) => (g === "M" || g === "F" ? g : null)),
     });
     return json(created, 201);
   } catch {

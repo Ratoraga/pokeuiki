@@ -154,3 +154,14 @@ ALTER TABLE abilities ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE moves ADD COLUMN IF NOT EXISTS effect TEXT;
 
 ALTER TABLE pokemon ADD COLUMN IF NOT EXISTS sprite TEXT;
+
+ALTER TABLE pokemon ADD COLUMN IF NOT EXISTS gender_rate SMALLINT;
+ALTER TABLE team_pokemon ADD COLUMN IF NOT EXISTS gender TEXT CHECK (gender IN ('M', 'F'));
+
+CREATE TABLE IF NOT EXISTS user_contacts (
+  owner_id   INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  contact_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_id, contact_id),
+  CHECK (owner_id <> contact_id)
+);

@@ -34,6 +34,7 @@ export interface PokemonDetail extends PokemonSummary {
   base: StatBlock;
   abilities: AbilityRef[];
   moves: Move[];
+  gender_rate: number | null;
 }
 
 export interface Item {
@@ -53,6 +54,7 @@ export interface Member {
   nickname: string | null;
   level: number;
   nature: string;
+  gender: "M" | "F" | null;
   ability: { id: number; name: string } | null;
   item: { id: number; name: string } | null;
   base: StatBlock;
@@ -73,6 +75,7 @@ export interface TeamDetail {
 }
 
 export interface BuildInput {
+  gender: "M" | "F" | null;
   nickname: string | null;
   level: number;
   nature: string;

@@ -54,6 +54,7 @@ export function parseBuild(body: unknown): BuildInput | string {
     nickname = rawNickname.trim();
     if (nickname.length > 50) return "O apelido pode ter no máximo 50 caracteres";
   }
+    const gender = b.gender === "M" || b.gender === "F" ? b.gender : null;
 
-  return { nickname, level, nature, ability_id: abilityId, item_id: itemId, ivs, evs, moves: moves as number[] };
+  return { nickname, level, nature, ability_id: abilityId, item_id: itemId, ivs, evs, moves: moves as number[], gender };
 }
