@@ -248,7 +248,7 @@ async function main() {
         <label>Dificuldade do bot <select id="level">
           <option value="normal" ${level === "normal" ? "selected" : ""}>Normal</option>
           <option value="hard" ${level === "hard" ? "selected" : ""}>Difícil (simula o próximo turno)</option>
-          <option value="master" ${level === "master" ? "selected" : ""}>Mestre (simula mais a fundo)</option></select></label></div></div>
+          <option value="master" ${level === "master" ? "selected" : ""}>Mestre (simula os dois próximos turnos)</option></select></label></div></div>
       ${error ? `<p class="error">${esc(error)}</p>` : ""}
       <div class="actions"><button class="primary" id="start" ${loading || playerChoice === null || presets.length === 0 ? "disabled" : ""}>${loading ? "Carregando..." : "Começar batalha"}</button></div></section>`;
   }
