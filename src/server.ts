@@ -56,7 +56,7 @@ const server = Bun.serve({
 
     "/battle/teams/:id": { GET: getBattleTeamRoute },
     "/battle/chart": { GET: getTypeChartRoute },
-        "/battle/moves": { GET: getMovesRoute }
+    "/battle/moves": { GET: getMovesRoute }
   },
   fetch() {
     return error("Rota não encontrada", 404);
